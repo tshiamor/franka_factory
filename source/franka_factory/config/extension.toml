@@ -1,0 +1,18 @@
+[package]
+version = "0.1.0"
+category = "isaaclab"
+title = "Franka Factory Tasks"
+author = "Tshiamo"
+description = "Factory manipulation tasks (peg insertion, gear mesh, nut threading) using Franka Panda robot"
+repository = ""
+keywords = ["isaaclab", "franka", "manipulation", "factory", "peg-insertion"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_tasks" = {}
+
+[[python.module]]
+name = "franka_factory"
+
+[isaac_lab_settings]

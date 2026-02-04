@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools", "wheel", "toml"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "franka_factory"
+version = "0.1.0"
+description = "Franka Factory manipulation tasks for IsaacLab"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["franka_factory*"]
