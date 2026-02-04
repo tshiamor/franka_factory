@@ -621,14 +621,15 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
             },
         )
 
-        # Success condition: block placed in first card's hole
-        # Task is complete when block is near the first MCX card position
+        # Success condition: block placed in first card's slot
+        # Target position from Cube_01 marker: X=-0.03034, Y=0.6432, Z=0.25665
+        # Task completes when block is aligned with slot within tolerance
         self.terminations.task_completed = DoneTerm(
             func=mdp.block_in_card_hole,
             params={
                 "block_cfg": SceneEntityCfg("block"),
-                "card_pos": [0.5, 0.10, 0.13],  # First card position
-                "threshold": 0.03,  # 3cm threshold for success
+                "target_pos": [-0.03034, 0.6432, 0.25665],  # Slot position from marker
+                "tolerance": [0.02, 0.02, 0.02],  # 2cm tolerance per axis
             },
         )
 

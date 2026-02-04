@@ -19,29 +19,42 @@ if TYPE_CHECKING:
 def block_in_card_hole(
     env: ManagerBasedRLEnv,
     block_cfg: SceneEntityCfg,
-    card_pos: list[float],
-    threshold: float = 0.03,
+    target_pos: list[float],
+    tolerance: list[float] | float = 0.02,
 ) -> torch.Tensor:
-    """Check if the block is placed in the card's hole.
+    """Check if the block is placed in the card's slot/hole position.
+
+    Uses per-axis tolerance checking to verify the block is aligned with
+    the target slot position in X, Y, and Z.
 
     Args:
         env: The environment instance.
         block_cfg: Configuration for the block asset.
-        card_pos: Target position [x, y, z] of the card's hole.
-        threshold: Distance threshold for success (default 3cm).
+        target_pos: Target position [x, y, z] of the slot/hole.
+        tolerance: Tolerance for each axis. Can be a single float (same for all axes)
+                   or a list [x_tol, y_tol, z_tol] for per-axis tolerance.
 
     Returns:
-        Boolean tensor indicating if block is in the hole for each environment.
+        Boolean tensor indicating if block is in the slot for each environment.
     """
     # Get block position
     block = env.scene[block_cfg.name]
     block_pos = block.data.root_pos_w[:, :3]
 
-    # Convert card position to tensor
-    target_pos = torch.tensor(card_pos, device=env.device).unsqueeze(0)
+    # Convert target position to tensor
+    target = torch.tensor(target_pos, device=env.device).unsqueeze(0)
 
-    # Calculate distance to target
-    distance = torch.norm(block_pos - target_pos, dim=-1)
+    # Handle tolerance - convert to per-axis if single value
+    if isinstance(tolerance, (int, float)):
+        tol = torch.tensor([tolerance, tolerance, tolerance], device=env.device)
+    else:
+        tol = torch.tensor(tolerance, device=env.device)
 
-    # Task complete if block is within threshold of card hole
-    return distance < threshold
+    # Check if block is within tolerance on each axis
+    diff = torch.abs(block_pos - target)
+    x_aligned = diff[:, 0] < tol[0]
+    y_aligned = diff[:, 1] < tol[1]
+    z_aligned = diff[:, 2] < tol[2]
+
+    # Task complete if aligned on all axes
+    return x_aligned & y_aligned & z_aligned
