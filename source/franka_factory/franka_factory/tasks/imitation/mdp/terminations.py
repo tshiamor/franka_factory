@@ -21,6 +21,7 @@ def block_in_card_hole(
     block_cfg: SceneEntityCfg,
     target_pos: list[float],
     tolerance: list[float] | float = 0.02,
+    debug: bool = True,
 ) -> torch.Tensor:
     """Check if the block is placed in the card's slot/hole position.
 
@@ -33,6 +34,7 @@ def block_in_card_hole(
         target_pos: Target position [x, y, z] of the slot/hole.
         tolerance: Tolerance for each axis. Can be a single float (same for all axes)
                    or a list [x_tol, y_tol, z_tol] for per-axis tolerance.
+        debug: If True, print block position periodically for debugging.
 
     Returns:
         Boolean tensor indicating if block is in the slot for each environment.
@@ -56,5 +58,29 @@ def block_in_card_hole(
     y_aligned = diff[:, 1] < tol[1]
     z_aligned = diff[:, 2] < tol[2]
 
+    # Debug output every ~100 steps
+    if debug and hasattr(env, '_term_debug_counter'):
+        env._term_debug_counter += 1
+        if env._term_debug_counter % 100 == 0:
+            print(f"[DEBUG] Block pos: [{block_pos[0,0]:.3f}, {block_pos[0,1]:.3f}, {block_pos[0,2]:.3f}] | "
+                  f"Target: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}] | "
+                  f"Diff: [{diff[0,0]:.3f}, {diff[0,1]:.3f}, {diff[0,2]:.3f}]")
+    elif debug and not hasattr(env, '_term_debug_counter'):
+        env._term_debug_counter = 0
+
     # Task complete if aligned on all axes
-    return x_aligned & y_aligned & z_aligned
+    success = x_aligned & y_aligned & z_aligned
+
+    # Only print success message once (when first entering the target zone)
+    was_in_target = getattr(env, '_block_was_in_target', False)
+    if success.any() and not was_in_target:
+        env._block_was_in_target = True
+        print("\n" + "*" * 60)
+        print("*" + " " * 20 + "BLOCK IN TARGET!" + " " * 20 + "*")
+        print(f"*    Position: [{block_pos[0,0]:.3f}, {block_pos[0,1]:.3f}, {block_pos[0,2]:.3f}]")
+        print("*" + " " * 58 + "*")
+        print("*" * 60 + "\n")
+    elif not success.any():
+        env._block_was_in_target = False
+
+    return success

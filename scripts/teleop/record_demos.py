@@ -47,8 +47,8 @@ parser.add_argument("--num_demos", type=int, default=0, help="Number of demos to
 parser.add_argument(
     "--num_success_steps",
     type=int,
-    default=10,
-    help="Steps with success condition for marking demo as successful",
+    default=5,
+    help="Steps with success condition for marking demo as successful (default: 5)",
 )
 
 # Append AppLauncher cli args
@@ -226,7 +226,11 @@ def main():
                                     [0], torch.tensor([[True]], dtype=torch.bool, device=env.device)
                                 )
                                 env.recorder_manager.export_episodes([0])
-                                print("Demo completed successfully!")
+                                demo_num = env.recorder_manager.exported_successful_episode_count
+                                print("\n" + "#" * 60)
+                                print(f"#    DEMO {demo_num} RECORDED SUCCESSFULLY!")
+                                print(f"#    Resetting environment for next demo...")
+                                print("#" * 60 + "\n")
                                 should_reset = True
                         else:
                             success_step_count = 0
@@ -248,8 +252,26 @@ def main():
                     env.sim.reset()
                     env.recorder_manager.reset()
                     env.reset()
+                    # Reset termination tracking state
+                    if hasattr(env, '_block_was_in_target'):
+                        env._block_was_in_target = False
                     success_step_count = 0
                     should_reset = False
+
+                    # Show episode notification
+                    next_demo = current_demo_count + 1
+                    remaining = args_cli.num_demos - current_demo_count if args_cli.num_demos > 0 else "unlimited"
+                    print("\n" + "=" * 60)
+                    print(f"    EPISODE {next_demo} STARTING")
+                    print(f"    Remaining demos: {remaining}")
+                    print("=" * 60 + "\n")
+
+                    # Try to send XR notification (if available)
+                    try:
+                        import carb
+                        carb.log_warn(f"Episode {next_demo} - Place block in target slot")
+                    except Exception:
+                        pass
 
                 # Check if stopped
                 if env.sim.is_stopped():

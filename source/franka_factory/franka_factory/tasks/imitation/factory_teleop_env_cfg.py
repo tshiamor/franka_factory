@@ -547,10 +547,12 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         )
 
         # MCX Card spawn configuration (shared by all cards)
+        # Added collision properties so objects cannot pass through the cards
         mcx_card_spawn = UsdFileCfg(
             usd_path="/home/tshiamo/3D_Assets/3d model/cards/ImageToStl.com_MCX416A-BCAT_A601/MCX416A-BCAT_A601.usdc",
             scale=(0.001, 0.001, 0.001),  # Scale from mm to meters
             semantic_tags=[("class", "mcx_card")],
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
         )
 
         # Add 5 MCX Cards arranged in a line along Y axis, spaced 5cm apart
@@ -558,7 +560,7 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         self.scene.mcx_card = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/MCXCard",
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=[0.5, 0.10, 0.13],
+                pos=[0.5, 0.15, 0.13],
                 rot=[0.707, 0, 0.707, 0],  # 90° CCW about Y axis
             ),
             spawn=mcx_card_spawn,
@@ -568,7 +570,7 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         self.scene.mcx_card_2 = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/MCXCard_2",
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=[0.5, 0.15, 0.13],
+                pos=[0.5, 0.20, 0.13],
                 rot=[0.707, 0, 0.707, 0],
             ),
             spawn=mcx_card_spawn,
@@ -578,7 +580,7 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         self.scene.mcx_card_3 = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/MCXCard_3",
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=[0.5, 0.20, 0.13],
+                pos=[0.5, 0.25, 0.13],
                 rot=[0.707, 0, 0.707, 0],
             ),
             spawn=mcx_card_spawn,
@@ -588,7 +590,7 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         self.scene.mcx_card_4 = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/MCXCard_4",
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=[0.5, 0.25, 0.13],
+                pos=[0.5, 0.30, 0.13],
                 rot=[0.707, 0, 0.707, 0],
             ),
             spawn=mcx_card_spawn,
@@ -598,10 +600,50 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
         self.scene.mcx_card_5 = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/MCXCard_5",
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=[0.5, 0.30, 0.13],
+                pos=[0.5, 0.35, 0.13],
                 rot=[0.707, 0, 0.707, 0],
             ),
             spawn=mcx_card_spawn,
+        )
+
+        # Target position for block placement
+        # Position in front of the first MCX card where block should be placed
+        target_pos = [0.45, 0.15, 0.08]  # In front of card 1, at table level + block half-height
+
+        # VISIBLE TARGET MARKER - Green semi-transparent cube showing where to place block
+        # This helps the user see exactly where to drop the block
+        self.scene.target_marker = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/TargetMarker",
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=[target_pos[0], target_pos[1], target_pos[2] + 0.05],  # Slightly above platform
+                rot=[1, 0, 0, 0],
+            ),
+            spawn=sim_utils.CuboidCfg(
+                size=(0.12, 0.04, 0.10),  # Match blue block dimensions (10cm x 2cm x 1cm but taller for visibility)
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),  # No collision - visual only
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.0, 1.0, 0.0),  # Bright green
+                    opacity=0.4,  # Semi-transparent so you can see through it
+                ),
+            ),
+        )
+
+        # PHYSICAL PLATFORM - Catches the block when dropped
+        # This prevents the block from falling through
+        self.scene.target_platform = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/TargetPlatform",
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=[target_pos[0], target_pos[1], target_pos[2] - 0.01],  # Just below target
+                rot=[1, 0, 0, 0],
+            ),
+            spawn=sim_utils.CuboidCfg(
+                size=(0.15, 0.08, 0.02),  # 15cm x 8cm x 2cm platform
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),  # Has collision!
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.3, 0.3, 0.3),  # Dark gray
+                    opacity=0.6,  # Slightly visible
+                ),
+            ),
         )
 
         # Add event to randomize block position on reset
@@ -621,15 +663,19 @@ class MCXCardBlockInsertTeleopEnvCfg(FactoryTeleopEnvCfg):
             },
         )
 
-        # Success condition: block placed in first card's slot
-        # Target position from Cube_01 marker: X=-0.03034, Y=0.6432, Z=0.25665
-        # Task completes when block is aligned with slot within tolerance
-        self.terminations.task_completed = DoneTerm(
+        # Socket position matches target platform
+        socket_pos = [target_pos[0], target_pos[1], target_pos[2]]
+
+        # Success condition: block placed on target platform
+        # Block center should be within tolerance of socket position when resting on platform
+        # NOTE: Named "success" so record_demos.py detects it properly
+        self.terminations.success = DoneTerm(
             func=mdp.block_in_card_hole,
             params={
                 "block_cfg": SceneEntityCfg("block"),
-                "target_pos": [-0.03034, 0.6432, 0.25665],  # Slot position from marker
-                "tolerance": [0.02, 0.02, 0.02],  # 2cm tolerance per axis
+                "target_pos": [socket_pos[0], socket_pos[1], socket_pos[2] + 0.05],  # Block center when on platform
+                "tolerance": [0.04, 0.03, 0.03],  # 4cm X, 3cm Y, 3cm Z - must be on/near the green marker
+                "debug": True,  # Enable debug output
             },
         )
 

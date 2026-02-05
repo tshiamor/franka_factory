@@ -188,6 +188,7 @@ franka_factory/
 │   │   └── play.py
 │   └── teleop/
 │       ├── record_demos.py
+│       ├── replay_demos.py
 │       └── teleop_agent.py
 └── source/
     └── franka_factory/
@@ -210,17 +211,21 @@ franka_factory/
 The `Franka-Factory-MCXCardBlockInsert-Teleop-v0` task features:
 - **Blue block**: 10cm × 2cm × 1cm cuboid (pickup object)
 - **MCX Cards**: 5 network cards arranged in a line along Y axis, spaced 5cm apart
-- **Success condition**: Block placed within 3cm of first card's slot
+- **Target marker**: Green semi-transparent cube showing where to place the block
+- **Target platform**: Gray platform that catches the block when dropped
+- **Success condition**: Block placed on target platform (within 4cm X, 3cm Y, 3cm Z tolerance)
 
-### Card Positions
+### Scene Layout
 
-| Card | Position (X, Y, Z) |
-|------|-------------------|
-| Card 1 (target) | [0.5, 0.10, 0.13] |
-| Card 2 | [0.5, 0.15, 0.13] |
-| Card 3 | [0.5, 0.20, 0.13] |
-| Card 4 | [0.5, 0.25, 0.13] |
-| Card 5 | [0.5, 0.30, 0.13] |
+| Element | Position (X, Y, Z) | Description |
+|---------|-------------------|-------------|
+| Card 1 | [0.5, 0.15, 0.13] | First MCX card |
+| Card 2 | [0.5, 0.20, 0.13] | Second MCX card |
+| Card 3 | [0.5, 0.25, 0.13] | Third MCX card |
+| Card 4 | [0.5, 0.30, 0.13] | Fourth MCX card |
+| Card 5 | [0.5, 0.35, 0.13] | Fifth MCX card |
+| Target Marker | [0.45, 0.15, 0.13] | Green cube (visual guide) |
+| Target Platform | [0.45, 0.15, 0.07] | Gray platform (catches block) |
 
 ### Running MCX Card Task
 
@@ -231,6 +236,52 @@ The `Franka-Factory-MCXCardBlockInsert-Teleop-v0` task features:
 # Teleop with CloudXR/Vision Pro
 ./isaaclab.sh -p scripts/teleop/teleop_agent.py --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 --teleop_device handtracking
 
-# Record demonstrations
-./isaaclab.sh -p scripts/teleop/record_demos.py --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 --num_demos 10 --dataset_file ./demos/mcx_card_demos.hdf5
+# Record demonstrations (15 demos)
+./isaaclab.sh -p scripts/teleop/record_demos.py --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 --num_demos 15 --dataset_file ./demos/mcx_card_demos.hdf5
+```
+
+### Recording Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--num_demos` | 0 (unlimited) | Number of demos to record |
+| `--num_success_steps` | 5 | Steps block must stay in target zone |
+| `--step_hz` | 30 | Environment stepping rate |
+| `--dataset_file` | `./datasets/franka_factory_demos.hdf5` | Output file path |
+
+### Replaying Demonstrations
+
+After recording, you can replay demonstrations to verify quality:
+
+```bash
+# Replay all demos
+./isaaclab.sh -p scripts/teleop/replay_demos.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5
+
+# Replay specific episode (e.g., episode 5)
+./isaaclab.sh -p scripts/teleop/replay_demos.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5 \
+    --episode 5
+
+# Replay at half speed (easier to watch)
+./isaaclab.sh -p scripts/teleop/replay_demos.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5 \
+    --speed 0.5
+```
+
+### Quick Dataset Inspection (No Simulation)
+
+Inspect the HDF5 dataset without launching the simulator:
+
+```bash
+python -c "
+import h5py
+with h5py.File('./demos/mcx_card_demos.hdf5', 'r') as f:
+    print('Episodes:', list(f['data'].keys()))
+    for ep in list(f['data'].keys())[:5]:
+        print(f'  {ep}: {len(f[\"data\"][ep][\"actions\"])} steps')
+"
 ```
