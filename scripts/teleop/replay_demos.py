@@ -6,7 +6,8 @@
 
 """Script to replay recorded demonstrations for Franka Factory tasks.
 
-This script loads an HDF5 dataset and replays the recorded episodes.
+This script loads an HDF5 dataset and replays the recorded episodes,
+including both robot actions AND object poses for accurate visual replay.
 
 Usage:
     # Replay all demos
@@ -34,6 +35,9 @@ parser.add_argument("--speed", type=float, default=1.0, help="Playback speed mul
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+# Enable cameras by default for replay (environment has cameras)
+args_cli.enable_cameras = True
+
 # Launch the simulator
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -48,6 +52,30 @@ import torch
 
 # Import franka factory extension
 import franka_factory  # noqa: F401
+
+
+def set_rigid_object_state(env, object_name: str, root_pose: torch.Tensor, root_velocity: torch.Tensor = None):
+    """Set the state of a rigid object in the scene.
+
+    Args:
+        env: The environment instance
+        object_name: Name of the rigid object (e.g., "block")
+        root_pose: Tensor of shape (num_envs, 7) with [x, y, z, qw, qx, qy, qz]
+        root_velocity: Optional tensor of shape (num_envs, 6) with [vx, vy, vz, wx, wy, wz]
+    """
+    # Get the rigid object from the scene
+    if hasattr(env.scene, object_name):
+        obj = getattr(env.scene, object_name)
+
+        # Set root state
+        obj.write_root_pose_to_sim(root_pose)
+
+        if root_velocity is not None:
+            obj.write_root_velocity_to_sim(root_velocity)
+        else:
+            # Set zero velocity if not provided
+            zero_vel = torch.zeros((root_pose.shape[0], 6), device=env.device)
+            obj.write_root_velocity_to_sim(zero_vel)
 
 
 def main():
@@ -73,6 +101,15 @@ def main():
 
             if len(episodes) > 5:
                 print(f"  ... and {len(episodes) - 5} more episodes")
+
+            # Check if object states are recorded
+            if episodes:
+                ep = f["data"][episodes[0]]
+                has_states = "states" in ep and "rigid_object" in ep["states"]
+                print(f"\nObject states recorded: {has_states}")
+                if has_states:
+                    objects = list(ep["states"]["rigid_object"].keys())
+                    print(f"  Objects: {objects}")
         else:
             print("Dataset structure:")
             def print_structure(name, obj):
@@ -124,9 +161,21 @@ def main():
             actions = np.array(ep["actions"])
             num_steps = len(actions)
 
+            # Load object states if available
+            object_states = {}
+            if "states" in ep and "rigid_object" in ep["states"]:
+                for obj_name in ep["states"]["rigid_object"].keys():
+                    obj_data = ep["states"]["rigid_object"][obj_name]
+                    object_states[obj_name] = {
+                        "root_pose": np.array(obj_data["root_pose"]) if "root_pose" in obj_data else None,
+                        "root_velocity": np.array(obj_data["root_velocity"]) if "root_velocity" in obj_data else None,
+                    }
+                print(f"Loaded states for objects: {list(object_states.keys())}")
+
             print("=" * 60)
             print(f"REPLAYING: {ep_name} ({ep_idx + 1}/{len(episodes)})")
             print(f"Steps: {num_steps}")
+            print(f"With object state replay: {len(object_states) > 0}")
             print("=" * 60)
 
             # Reset environment for this episode
@@ -136,15 +185,35 @@ def main():
             step_dt = env.cfg.sim.dt * env.cfg.decimation
             step_delay = step_dt / args_cli.speed
 
-            # Replay actions
+            # Replay actions and object states
             for step_idx, action in enumerate(actions):
                 start_time = time.time()
 
                 # Convert action to tensor
                 action_tensor = torch.tensor(action, device=env.device).unsqueeze(0)
 
-                # Step environment
+                # Step environment with action
                 env.step(action_tensor)
+
+                # Apply recorded object states AFTER the physics step
+                # This ensures the object appears in the correct position for rendering
+                for obj_name, states in object_states.items():
+                    if states["root_pose"] is not None and step_idx < len(states["root_pose"]):
+                        root_pose = torch.tensor(
+                            states["root_pose"][step_idx],
+                            device=env.device,
+                            dtype=torch.float32
+                        ).unsqueeze(0)
+
+                        root_vel = None
+                        if states["root_velocity"] is not None and step_idx < len(states["root_velocity"]):
+                            root_vel = torch.tensor(
+                                states["root_velocity"][step_idx],
+                                device=env.device,
+                                dtype=torch.float32
+                            ).unsqueeze(0)
+
+                        set_rigid_object_state(env, obj_name, root_pose, root_vel)
 
                 # Print progress every 50 steps
                 if step_idx % 50 == 0:
