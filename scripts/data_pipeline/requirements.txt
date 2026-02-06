@@ -1,0 +1,19 @@
+# Requirements for data pipeline scripts
+
+# Hugging Face
+huggingface_hub>=0.20.0
+
+# Video processing
+imageio[ffmpeg]>=2.31.0
+opencv-python>=4.8.0
+
+# Data handling
+h5py>=3.9.0
+numpy>=1.24.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# For Cosmos on Brev (install separately)
+# torch>=2.0.0
+# cosmos-transfer  # NVIDIA Cosmos package
