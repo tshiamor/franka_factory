@@ -18,13 +18,22 @@ if TYPE_CHECKING:
 
 
 def ee_frame_pos(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
-    """End-effector position in world frame."""
+    """End-effector position in relative frame (relative to environment origin).
+
+    Using relative coordinates ensures consistency with get_object_poses() for Mimic.
+    """
     ee_frame = env.scene[asset_cfg.name]
-    return ee_frame.data.target_pos_w[:, 0, :]
+    ee_pos_w = ee_frame.data.target_pos_w[:, 0, :]
+    # Convert to relative coordinates by subtracting environment origin
+    env_origins = env.scene.env_origins
+    return ee_pos_w - env_origins
 
 
 def ee_frame_quat(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
-    """End-effector orientation (quaternion) in world frame."""
+    """End-effector orientation (quaternion) in world frame.
+
+    Orientation is the same in world and relative frames (only position differs).
+    """
     ee_frame = env.scene[asset_cfg.name]
     return ee_frame.data.target_quat_w[:, 0, :]
 

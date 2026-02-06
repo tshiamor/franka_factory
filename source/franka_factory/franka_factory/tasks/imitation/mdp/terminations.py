@@ -31,7 +31,7 @@ def block_in_card_hole(
     Args:
         env: The environment instance.
         block_cfg: Configuration for the block asset.
-        target_pos: Target position [x, y, z] of the slot/hole.
+        target_pos: Target position [x, y, z] of the slot/hole (relative to env origin).
         tolerance: Tolerance for each axis. Can be a single float (same for all axes)
                    or a list [x_tol, y_tol, z_tol] for per-axis tolerance.
         debug: If True, print block position periodically for debugging.
@@ -39,11 +39,13 @@ def block_in_card_hole(
     Returns:
         Boolean tensor indicating if block is in the slot for each environment.
     """
-    # Get block position
+    # Get block position in relative coordinates (relative to each environment's origin)
     block = env.scene[block_cfg.name]
-    block_pos = block.data.root_pos_w[:, :3]
+    # Use world position minus environment origins to get relative position
+    env_origins = env.scene.env_origins
+    block_pos_rel = block.data.root_pos_w[:, :3] - env_origins[:, :3]
 
-    # Convert target position to tensor
+    # Convert target position to tensor (already in relative coords)
     target = torch.tensor(target_pos, device=env.device).unsqueeze(0)
 
     # Handle tolerance - convert to per-axis if single value
@@ -52,8 +54,8 @@ def block_in_card_hole(
     else:
         tol = torch.tensor(tolerance, device=env.device)
 
-    # Check if block is within tolerance on each axis
-    diff = torch.abs(block_pos - target)
+    # Check if block is within tolerance on each axis (using relative position)
+    diff = torch.abs(block_pos_rel - target)
     x_aligned = diff[:, 0] < tol[0]
     y_aligned = diff[:, 1] < tol[1]
     z_aligned = diff[:, 2] < tol[2]
@@ -62,7 +64,7 @@ def block_in_card_hole(
     if debug and hasattr(env, '_term_debug_counter'):
         env._term_debug_counter += 1
         if env._term_debug_counter % 100 == 0:
-            print(f"[DEBUG] Block pos: [{block_pos[0,0]:.3f}, {block_pos[0,1]:.3f}, {block_pos[0,2]:.3f}] | "
+            print(f"[DEBUG] Block pos (rel): [{block_pos_rel[0,0]:.3f}, {block_pos_rel[0,1]:.3f}, {block_pos_rel[0,2]:.3f}] | "
                   f"Target: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}] | "
                   f"Diff: [{diff[0,0]:.3f}, {diff[0,1]:.3f}, {diff[0,2]:.3f}]")
     elif debug and not hasattr(env, '_term_debug_counter'):
@@ -77,7 +79,7 @@ def block_in_card_hole(
         env._block_was_in_target = True
         print("\n" + "*" * 60)
         print("*" + " " * 20 + "BLOCK IN TARGET!" + " " * 20 + "*")
-        print(f"*    Position: [{block_pos[0,0]:.3f}, {block_pos[0,1]:.3f}, {block_pos[0,2]:.3f}]")
+        print(f"*    Position (rel): [{block_pos_rel[0,0]:.3f}, {block_pos_rel[0,1]:.3f}, {block_pos_rel[0,2]:.3f}]")
         print("*" + " " * 58 + "*")
         print("*" * 60 + "\n")
     elif not success.any():
