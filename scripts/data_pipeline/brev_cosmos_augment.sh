@@ -251,14 +251,14 @@ AUGMENTATION_PROMPTS = [
     "A robot manipulator in an aerospace assembly facility, handling sensitive electronic modules. Clean room environment with filtered lighting.",
 ]
 
-def create_spec_file(video_path, prompt, output_name, specs_dir, max_frames=150):
+def create_spec_file(video_path, prompt, output_name, specs_dir):
+    """Create spec file for Cosmos inference. Note: num_input_frames removed - not supported by Cosmos 2.5"""
     spec = {
         "name": output_name,
         "prompt": prompt,
         "video_path": str(video_path),
         "guidance": 3,
         "seed": 2025,
-        "num_input_frames": max_frames,
         "edge": {"control_weight": 0.9},
     }
     spec_path = Path(specs_dir) / f"{output_name}_spec.json"
@@ -328,7 +328,7 @@ def main():
             aug_name = f"{video_name}_aug{aug_idx}"
             print(f"  [{aug_idx+1}/{num_aug}] {aug_name}", flush=True)
 
-            spec_file = create_spec_file(video_path, prompt, aug_name, specs_dir, max_frames)
+            spec_file = create_spec_file(video_path, prompt, aug_name, specs_dir)
             temp_out = output_dir / f"temp_inference_shard{shard_index}"
             temp_out.mkdir(exist_ok=True)
 
