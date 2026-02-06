@@ -23,9 +23,10 @@ set -euo pipefail
 # ---- Configuration ----
 HF_DATASET="tshiamor/mcx-card-demos-vla"
 HF_OUTPUT_REPO="tshiamor/mcx-card-cosmos-augmented"
-NUM_AUGMENTATIONS=5
+NUM_AUGMENTATIONS=1
 NUM_GPUS=4
-MAX_FRAMES=150
+MAX_FRAMES=448
+MAX_VIDEOS=100  # Set to 0 or empty to process all videos
 WORK_DIR="${HOME}/cosmos-augmentation-mcx"
 COSMOS_REPO="${WORK_DIR}/cosmos-transfer2.5"
 DATASET_DIR="${WORK_DIR}/dataset"
@@ -38,6 +39,7 @@ echo "Dataset: ${HF_DATASET}"
 echo "Output:  ${HF_OUTPUT_REPO}"
 echo "Augmentations per video: ${NUM_AUGMENTATIONS}"
 echo "Max frames per video: ${MAX_FRAMES}"
+echo "Max videos to process: ${MAX_VIDEOS:-all}"
 echo "GPUs: ${NUM_GPUS}"
 echo ""
 
@@ -278,8 +280,9 @@ def run_inference(spec_file, output_dir):
 def main():
     input_dir = Path(os.environ.get("INPUT_DIR", "/data/input"))
     output_dir = Path(os.environ.get("OUTPUT_DIR", "/data/output"))
-    num_aug = int(os.environ.get("NUM_AUGMENTATIONS", "5"))
-    max_frames = int(os.environ.get("MAX_FRAMES", "150"))
+    num_aug = int(os.environ.get("NUM_AUGMENTATIONS", "1"))
+    max_frames = int(os.environ.get("MAX_FRAMES", "448"))
+    max_videos = int(os.environ.get("MAX_VIDEOS", "0"))  # 0 = all videos
     shard_index = int(os.environ.get("SHARD_INDEX", "0"))
     num_shards = int(os.environ.get("NUM_SHARDS", "1"))
 
@@ -297,8 +300,11 @@ def main():
         if metadata_src.exists():
             shutil.copy(metadata_src, output_dir / "metadata.json")
 
-    # Get all videos, then select this shard's subset
+    # Get all videos, limit if MAX_VIDEOS is set, then select this shard's subset
     all_videos = sorted(videos_dir.glob("*.mp4"))
+    if max_videos > 0:
+        all_videos = all_videos[:max_videos]
+        print(f"Limiting to first {max_videos} videos")
     shard_videos = [v for i, v in enumerate(all_videos) if i % num_shards == shard_index]
 
     print(f"Shard {shard_index}/{num_shards}: processing {len(shard_videos)} of {len(all_videos)} videos")
@@ -422,6 +428,7 @@ for GPU_ID in $(seq 0 $((NUM_GPUS - 1))); do
         -e OUTPUT_DIR=/data/output \
         -e NUM_AUGMENTATIONS="${NUM_AUGMENTATIONS}" \
         -e MAX_FRAMES="${MAX_FRAMES}" \
+        -e MAX_VIDEOS="${MAX_VIDEOS}" \
         -e SHARD_INDEX="${GPU_ID}" \
         -e NUM_SHARDS="${NUM_GPUS}" \
         cosmos-transfer2.5 \
@@ -511,7 +518,9 @@ echo "Input:  https://huggingface.co/datasets/${HF_DATASET}"
 echo "Output: https://huggingface.co/datasets/${HF_OUTPUT_REPO}"
 echo ""
 echo "Summary:"
-echo "  - Original videos: ${VIDEO_COUNT}"
+echo "  - Max videos limit: ${MAX_VIDEOS:-all}"
+echo "  - Videos processed: ${VIDEO_COUNT}"
 echo "  - Augmentations per video: ${NUM_AUGMENTATIONS}"
+echo "  - Max frames: ${MAX_FRAMES}"
 echo "  - Total output: ${TOTAL_VIDEOS} videos"
 echo "============================================="
