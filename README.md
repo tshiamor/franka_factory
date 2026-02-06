@@ -187,9 +187,11 @@ franka_factory/
 │   │   ├── train.py
 │   │   └── play.py
 │   └── teleop/
-│       ├── record_demos.py
-│       ├── replay_demos.py
-│       └── teleop_agent.py
+│       ├── record_demos.py          # Record demonstrations via teleoperation
+│       ├── replay_demos.py          # Interactive action-based replay
+│       ├── replay_demos_resetmethod.py  # State-based replay for video generation
+│       ├── replay_demos_statebased.py   # Alternative state-based replay
+│       └── teleop_agent.py          # Teleoperation testing (no recording)
 └── source/
     └── franka_factory/
         └── franka_factory/
@@ -251,10 +253,12 @@ The `Franka-Factory-MCXCardBlockInsert-Teleop-v0` task features:
 
 ### Replaying Demonstrations
 
-After recording, you can replay demonstrations to verify quality:
+After recording, you can replay demonstrations to verify quality. There are multiple replay methods available:
+
+#### Interactive Replay (Action-Based)
 
 ```bash
-# Replay all demos
+# Replay all demos with visual feedback
 ./isaaclab.sh -p scripts/teleop/replay_demos.py \
     --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
     --dataset_file ./demos/mcx_card_demos.hdf5
@@ -272,6 +276,53 @@ After recording, you can replay demonstrations to verify quality:
     --speed 0.5
 ```
 
+#### State-Based Replay (Recommended for Video Generation)
+
+For accurate visual replay where objects appear in their exact recorded positions, use the
+state-based replay script with `scene.reset_to()`:
+
+```bash
+# Generate video of episode 0 using state-based replay
+./isaaclab.sh -p scripts/teleop/replay_demos_resetmethod.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5 \
+    --episode 0 \
+    --output_dir ./videos \
+    --camera table_cam \
+    --headless
+
+# Generate videos for ALL episodes
+./isaaclab.sh -p scripts/teleop/replay_demos_resetmethod.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5 \
+    --all \
+    --output_dir ./videos \
+    --camera table_cam \
+    --headless
+
+# Generate video with wrist camera view
+./isaaclab.sh -p scripts/teleop/replay_demos_resetmethod.py \
+    --task Franka-Factory-MCXCardBlockInsert-Teleop-v0 \
+    --dataset_file ./demos/mcx_card_demos.hdf5 \
+    --episode 0 \
+    --output_dir ./videos \
+    --camera wrist_cam \
+    --headless
+```
+
+**Important:** The `replay_demos_resetmethod.py` script uses `scene.reset_to()` which directly
+sets robot joint states and object poses from the HDF5 data. This ensures manipulated objects
+(like the blue block) appear in their exact recorded positions, which is essential for
+generating accurate training videos for visuomotor policies.
+
+#### Replay Script Comparison
+
+| Script | Method | Use Case |
+|--------|--------|----------|
+| `replay_demos.py` | Action replay | Interactive viewing, debugging |
+| `replay_demos_resetmethod.py` | State replay via `reset_to()` | Video generation, visuomotor training data |
+| `replay_demos_statebased.py` | Direct state setting | Alternative state-based replay |
+
 ### Quick Dataset Inspection (No Simulation)
 
 Inspect the HDF5 dataset without launching the simulator:
@@ -285,3 +336,44 @@ with h5py.File('./demos/mcx_card_demos.hdf5', 'r') as f:
         print(f'  {ep}: {len(f[\"data\"][ep][\"actions\"])} steps')
 "
 ```
+
+### HDF5 Data Structure
+
+The recorded demonstrations contain:
+
+```
+data/
+├── demo_0/
+│   ├── actions                    # (N, 7) - Recorded actions
+│   ├── obs/
+│   │   ├── actions               # (N, 7) - Action observations
+│   │   ├── eef_pos               # (N, 3) - End-effector position
+│   │   ├── eef_quat              # (N, 4) - End-effector orientation
+│   │   ├── gripper_pos           # (N, 2) - Gripper finger positions
+│   │   ├── joint_pos             # (N, 9) - Robot joint positions
+│   │   └── joint_vel             # (N, 9) - Robot joint velocities
+│   └── states/
+│       ├── articulation/
+│       │   └── robot/
+│       │       ├── joint_position    # (N, 9) - Robot joint states
+│       │       ├── joint_velocity    # (N, 9) - Robot joint velocities
+│       │       ├── root_pose         # (N, 7) - Robot base pose
+│       │       └── root_velocity     # (N, 6) - Robot base velocity
+│       └── rigid_object/
+│           └── block/
+│               ├── root_pose         # (N, 7) - Block pose (x,y,z,qw,qx,qy,qz)
+│               └── root_velocity     # (N, 6) - Block velocity
+├── demo_1/
+│   └── ...
+```
+
+### Video Generation Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--episode` | 0 | Episode index to replay (ignored if `--all` is set) |
+| `--all` | False | Replay all episodes in the dataset |
+| `--output_dir` | `./videos` | Directory for output videos |
+| `--fps` | 30 | Video frame rate |
+| `--camera` | `table_cam` | Camera to use (`table_cam` or `wrist_cam`) |
+| `--headless` | False | Run without GUI (faster) |
