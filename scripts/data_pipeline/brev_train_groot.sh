@@ -67,7 +67,7 @@ echo ""
 # ---- Step 1: Install system dependencies + conda ----
 echo "[Step 1/6] Installing system dependencies..."
 sudo apt-get update -qq || echo "  Warning: apt-get update had errors"
-sudo apt-get install -y -qq git git-lfs curl wget ffmpeg libgl1-mesa-glx > /dev/null 2>&1 || true
+sudo apt-get install -y -qq git git-lfs curl wget ffmpeg libgl1-mesa-glx cmake build-essential libegl1-mesa-dev > /dev/null 2>&1 || true
 git lfs install
 
 # Install Miniconda if not present
