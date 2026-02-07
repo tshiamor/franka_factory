@@ -3,7 +3,7 @@
 Prepare MCX Card demos for LeRobot v3.0 format.
 
 LeRobot v3.0 requires:
-- data/chunk-XXX/file-XXX.parquet (frame data)
+- data/chunk-XXX/file-XXX.parquet (frame data with nested list columns)
 - videos/<feature>/chunk-XXX/episode_XXXXXX.mp4
 - meta/info.json with features schema
 - meta/episodes/chunk-XXX/file-XXX.parquet
@@ -26,6 +26,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
@@ -49,7 +51,7 @@ def parse_args():
 
 def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "wrist_rgb",
                                 max_episodes: int = None, fps: int = 30):
-    """Create LeRobot v3.0 compatible dataset."""
+    """Create LeRobot v3.0 compatible dataset with nested list columns."""
     output_path = Path(output_dir)
 
     # Create directories
@@ -65,6 +67,10 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     all_frames = []
     episode_data = []
     total_frames = 0
+
+    # For stats computation
+    all_actions = []
+    all_states = []
 
     with h5py.File(hdf5_path, "r") as f:
         episode_names = sorted(list(f["data"].keys()))
@@ -95,22 +101,22 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
             if actions is not None:
                 action_dim = actions.shape[-1]
 
-            # Get states
-            states = {}
+            # Get states and concatenate them
+            state_arrays = []
             if "obs" in ep_group:
-                for key in ["joint_pos", "eef_pos", "eef_quat", "gripper_pos"]:
+                for key in ["eef_pos", "eef_quat", "gripper_pos", "joint_pos"]:
                     if key in ep_group["obs"]:
-                        states[key] = np.array(ep_group["obs"][key])
+                        state_arrays.append(np.array(ep_group["obs"][key]))
 
-            # Compute state dimension (concatenate all state components)
-            if states:
-                state_arrays = [states[k] for k in sorted(states.keys()) if len(states[k]) > 0]
-                if state_arrays:
-                    combined_state = np.concatenate([s[0] for s in state_arrays])
-                    state_dim = combined_state.shape[0]
+            # Concatenate state components along last axis
+            if state_arrays:
+                # All arrays should have shape (T, dim_i)
+                combined_states = np.concatenate(state_arrays, axis=-1)
+                state_dim = combined_states.shape[-1]
+            else:
+                combined_states = None
 
             num_steps = len(images)
-            ep_start_frame = total_frames
 
             # Save video
             try:
@@ -123,47 +129,88 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
             except Exception as e:
                 print(f"Warning: Could not save video for {ep_name}: {e}")
 
-            # Build frame data
+            # Build frame data with nested lists
             for t in range(num_steps):
                 frame = {
-                    "episode_index": ep_idx,
-                    "frame_index": total_frames,
-                    "timestamp": t / fps,
+                    "episode_index": np.int64(ep_idx),
+                    "frame_index": np.int64(total_frames),
+                    "timestamp": float(t / fps),
+                    "task_index": np.int64(0),
+                    "index": np.int64(total_frames),
                 }
 
-                # Add action
+                # Add action as a list (not individual columns)
                 if actions is not None and t < len(actions):
-                    for i in range(actions.shape[-1]):
-                        frame[f"action_{i}"] = float(actions[t, i])
+                    action_list = [float(x) for x in actions[t]]
+                    frame["action"] = action_list
+                    all_actions.append(actions[t])
 
-                # Add state (concatenated)
-                if states:
-                    state_idx = 0
-                    for key in sorted(states.keys()):
-                        if t < len(states[key]):
-                            state_val = states[key][t]
-                            if isinstance(state_val, np.ndarray):
-                                for i, v in enumerate(state_val):
-                                    frame[f"observation.state_{state_idx}"] = float(v)
-                                    state_idx += 1
-                            else:
-                                frame[f"observation.state_{state_idx}"] = float(state_val)
-                                state_idx += 1
+                # Add state as a list (not individual columns)
+                if combined_states is not None and t < len(combined_states):
+                    state_list = [float(x) for x in combined_states[t]]
+                    frame["observation.state"] = state_list
+                    all_states.append(combined_states[t])
 
                 all_frames.append(frame)
                 total_frames += 1
 
             # Episode metadata
             episode_data.append({
-                "episode_index": ep_idx,
+                "episode_index": np.int64(ep_idx),
                 "tasks": json.dumps([TASK_INSTRUCTION]),
-                "length": num_steps,
+                "length": np.int64(num_steps),
             })
 
-    # Save frame data as parquet
-    print(f"Saving {len(all_frames)} frames...")
-    df = pd.DataFrame(all_frames)
-    df.to_parquet(data_dir / "file-000.parquet", index=False)
+    # Create PyArrow schema for nested list columns
+    print(f"Saving {len(all_frames)} frames with nested list columns...")
+
+    # Build the schema
+    schema_fields = [
+        pa.field("episode_index", pa.int64()),
+        pa.field("frame_index", pa.int64()),
+        pa.field("timestamp", pa.float64()),
+        pa.field("task_index", pa.int64()),
+        pa.field("index", pa.int64()),
+    ]
+
+    if action_dim:
+        # Fixed-size list for actions
+        schema_fields.append(pa.field("action", pa.list_(pa.float32(), action_dim)))
+
+    if state_dim:
+        # Fixed-size list for states
+        schema_fields.append(pa.field("observation.state", pa.list_(pa.float32(), state_dim)))
+
+    schema = pa.schema(schema_fields)
+
+    # Convert to PyArrow table
+    arrays = {
+        "episode_index": pa.array([f["episode_index"] for f in all_frames], type=pa.int64()),
+        "frame_index": pa.array([f["frame_index"] for f in all_frames], type=pa.int64()),
+        "timestamp": pa.array([f["timestamp"] for f in all_frames], type=pa.float64()),
+        "task_index": pa.array([f["task_index"] for f in all_frames], type=pa.int64()),
+        "index": pa.array([f["index"] for f in all_frames], type=pa.int64()),
+    }
+
+    if action_dim:
+        # Create fixed-size list array for actions
+        action_data = [f.get("action", [0.0] * action_dim) for f in all_frames]
+        arrays["action"] = pa.FixedSizeListArray.from_arrays(
+            pa.array([x for action in action_data for x in action], type=pa.float32()),
+            action_dim
+        )
+
+    if state_dim:
+        # Create fixed-size list array for states
+        state_data = [f.get("observation.state", [0.0] * state_dim) for f in all_frames]
+        arrays["observation.state"] = pa.FixedSizeListArray.from_arrays(
+            pa.array([x for state in state_data for x in state], type=pa.float32()),
+            state_dim
+        )
+
+    # Create table and write to parquet
+    table = pa.table(arrays, schema=schema)
+    pq.write_table(table, data_dir / "file-000.parquet")
 
     # Save episode metadata
     ep_df = pd.DataFrame(episode_data)
@@ -225,18 +272,26 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     with open(meta_dir / "info.json", "w") as f:
         json.dump(info, f, indent=2)
 
-    # Compute and save stats
+    # Compute and save stats (for the nested list columns)
     stats = {}
-    for col in df.columns:
-        if col.startswith("action_") or col.startswith("observation.state_"):
-            values = df[col].dropna().values
-            if len(values) > 0:
-                stats[col] = {
-                    "mean": float(np.mean(values)),
-                    "std": float(np.std(values)),
-                    "min": float(np.min(values)),
-                    "max": float(np.max(values)),
-                }
+
+    if all_actions:
+        all_actions_arr = np.array(all_actions)
+        stats["action"] = {
+            "mean": [float(x) for x in np.mean(all_actions_arr, axis=0)],
+            "std": [float(x) for x in np.std(all_actions_arr, axis=0)],
+            "min": [float(x) for x in np.min(all_actions_arr, axis=0)],
+            "max": [float(x) for x in np.max(all_actions_arr, axis=0)],
+        }
+
+    if all_states:
+        all_states_arr = np.array(all_states)
+        stats["observation.state"] = {
+            "mean": [float(x) for x in np.mean(all_states_arr, axis=0)],
+            "std": [float(x) for x in np.std(all_states_arr, axis=0)],
+            "min": [float(x) for x in np.min(all_states_arr, axis=0)],
+            "max": [float(x) for x in np.max(all_states_arr, axis=0)],
+        }
 
     # Add image stats (ImageNet defaults)
     stats[f"observation.images.{camera}"] = {
