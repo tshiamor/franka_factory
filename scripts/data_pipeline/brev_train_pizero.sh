@@ -26,7 +26,7 @@ WORK_DIR="${HOME}/pizero-training"
 DATASET_DIR="${WORK_DIR}/dataset"
 OUTPUT_DIR="${WORK_DIR}/outputs"
 NUM_EPOCHS=100
-BATCH_SIZE=32
+BATCH_SIZE=64  # Optimized for H100 81GB VRAM
 LEARNING_RATE="1e-4"
 NUM_GPUS=4
 
@@ -97,10 +97,7 @@ fi
 
 conda activate ${ENV_NAME}
 
-# Install PyTorch with CUDA
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 -q
-
-# Clone and install LeRobot
+# Clone and install LeRobot (it will install compatible PyTorch automatically)
 mkdir -p "${WORK_DIR}"
 if [ ! -d "${WORK_DIR}/lerobot" ]; then
     echo "  Cloning LeRobot..."
@@ -108,7 +105,10 @@ if [ ! -d "${WORK_DIR}/lerobot" ]; then
 fi
 
 cd "${WORK_DIR}/lerobot"
-pip install -e ".[all]" -q
+
+# Install LeRobot with all dependencies (includes PyTorch with CUDA)
+echo "  Installing LeRobot (this includes PyTorch)..."
+pip install -e ".[all]" -q 2>&1 | grep -v "^ERROR:" || true
 
 # Additional dependencies
 pip install huggingface_hub wandb imageio[ffmpeg] -q
@@ -116,101 +116,31 @@ pip install huggingface_hub wandb imageio[ffmpeg] -q
 echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 
-# ---- Step 3: Download dataset from HuggingFace ----
-echo "[Step 3/6] Downloading dataset from HuggingFace..."
+# ---- Step 3: Verify dataset on HuggingFace ----
+echo "[Step 3/6] Verifying dataset on HuggingFace..."
 
-export DATASET_DIR HF_DATASET
+# LeRobot will download the dataset automatically during training
+# Just verify it exists
 python - <<'PYEOF'
 import os
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi
 
-dataset_dir = os.environ.get("DATASET_DIR", os.path.expanduser("~/pizero-training/dataset"))
 hf_dataset = os.environ.get("HF_DATASET", "tshiamor/mcx-card-pizero")
+api = HfApi()
 
-print(f"Downloading {hf_dataset} to {dataset_dir}...")
-snapshot_download(
-    repo_id=hf_dataset,
-    repo_type="dataset",
-    local_dir=dataset_dir,
-)
-print(f"Dataset downloaded to {dataset_dir}")
+try:
+    info = api.dataset_info(hf_dataset)
+    print(f"Dataset found: {hf_dataset}")
+    print(f"  Size: {info.cardData.get('size_categories', 'unknown') if info.cardData else 'unknown'}")
+except Exception as e:
+    print(f"Warning: Could not verify dataset {hf_dataset}: {e}")
+    print("Training will attempt to download it anyway...")
 PYEOF
 
-echo "  Dataset contents:"
-ls -la "${DATASET_DIR}/"
+# ---- Step 4: Prepare training ----
+echo "[Step 4/6] Preparing training..."
 
-# ---- Step 4: Create training configuration ----
-echo "[Step 4/6] Creating training configuration..."
-
-mkdir -p "${WORK_DIR}/configs"
-
-# Create training config for Pi-Zero style policy (using ACT as base)
-cat > "${WORK_DIR}/configs/mcx_card_pizero.yaml" << 'CONFIGEOF'
-# Pi-Zero style training config for MCX Card manipulation
-# Based on ACT (Action Chunking Transformer) architecture
-
-seed: 42
-dataset_repo_id: tshiamor/mcx-card-pizero
-
-training:
-  offline_steps: 100000
-  online_steps: 0
-  eval_freq: 10000
-  save_freq: 25000
-  log_freq: 100
-  save_checkpoint: true
-
-  batch_size: 32
-  lr: 1e-4
-  lr_backbone: 1e-5
-  weight_decay: 1e-4
-  grad_clip_norm: 10
-
-  # Data augmentation
-  image_transforms:
-    enable: true
-    brightness:
-      weight: 0.3
-      min_max: [0.8, 1.2]
-    contrast:
-      weight: 0.3
-      min_max: [0.8, 1.2]
-    saturation:
-      weight: 0.3
-      min_max: [0.8, 1.2]
-    hue:
-      weight: 0.1
-      min_max: [-0.05, 0.05]
-
-policy:
-  name: act
-
-  # Vision encoder
-  vision_backbone: resnet18
-  pretrained_backbone: true
-
-  # Transformer config
-  n_obs_steps: 2
-  chunk_size: 16
-  n_action_steps: 16
-
-  dim_model: 512
-  n_heads: 8
-  n_encoder_layers: 4
-  n_decoder_layers: 1
-
-  # Input normalization
-  input_normalization_modes:
-    observation.images.wrist_rgb: mean_std
-    observation.images.table_rgb: mean_std
-    observation.state: mean_std
-    action: mean_std
-
-eval:
-  n_episodes: 10
-  batch_size: 10
-  use_async_envs: false
-CONFIGEOF
+mkdir -p "${OUTPUT_DIR}"
 
 # ---- Step 5: Run training ----
 echo "[Step 5/6] Starting training..."
@@ -219,27 +149,36 @@ cd "${WORK_DIR}/lerobot"
 
 # Set environment variables
 export WANDB_PROJECT="pizero-mcx-card"
-export DATA_DIR="${DATASET_DIR}"
-export OUTPUT_DIR="${OUTPUT_DIR}"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export PYTHONPATH="${WORK_DIR}/lerobot:${PYTHONPATH:-}"
+
+# Verify lerobot is importable
+echo "  Verifying LeRobot installation..."
+python -c "import lerobot; print(f'LeRobot version: {lerobot.__version__}')" || {
+    echo "  LeRobot not importable, reinstalling..."
+    pip install -e . --no-deps -q
+}
 
 # Run training with LeRobot
-python lerobot/scripts/train.py \
-    --config-path="${WORK_DIR}/configs" \
-    --config-name=mcx_card_pizero \
-    hydra.run.dir="${OUTPUT_DIR}" \
-    training.offline_steps=100000 \
-    training.batch_size=${BATCH_SIZE} \
-    training.lr=${LEARNING_RATE} \
-    policy.chunk_size=${CHUNK_SIZE} \
-    policy.n_action_steps=${ACTION_HORIZON} \
-    wandb.enable=true \
-    wandb.project="pizero-mcx-card" \
+# Uses ACT policy (Action Chunking Transformer) for Pi-Zero style training
+python -m lerobot.scripts.lerobot_train \
+    --policy.type act \
+    --dataset.repo_id "${HF_DATASET}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --batch_size ${BATCH_SIZE} \
+    --steps 100000 \
+    --save_freq 25000 \
+    --log_freq 100 \
+    --policy.chunk_size ${CHUNK_SIZE} \
+    --policy.n_action_steps ${ACTION_HORIZON} \
+    --wandb.enable true \
+    --wandb.project "pizero-mcx-card" \
     2>&1 | tee "${WORK_DIR}/training.log"
 
 # ---- Step 6: Upload to HuggingFace ----
 echo "[Step 6/6] Uploading trained model to HuggingFace..."
 
-export OUTPUT_DIR HF_MODEL_REPO
+export HF_MODEL_REPO
 python - <<'UPLOADEOF'
 import os
 from pathlib import Path
