@@ -71,19 +71,21 @@ sudo apt-get install -y -qq git git-lfs curl wget ffmpeg libgl1-mesa-glx > /dev/
 git lfs install
 
 # Install Miniconda if not present
-if ! command -v conda &>/dev/null; then
-    if [ ! -d "${HOME}/miniconda3" ]; then
-        echo "  Installing Miniconda..."
-        wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/Miniconda3.sh
-        bash /tmp/Miniconda3.sh -b -p "${HOME}/miniconda3"
-    fi
+if [ ! -d "${HOME}/miniconda3" ]; then
+    echo "  Installing Miniconda..."
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/Miniconda3.sh
+    bash /tmp/Miniconda3.sh -b -p "${HOME}/miniconda3"
 fi
 
-# Activate conda
-if [ -f "${HOME}/miniconda3/bin/conda" ]; then
-    eval "$(${HOME}/miniconda3/bin/conda shell.bash hook)"
-    echo "  Conda version: $(conda --version)"
-fi
+# Activate conda (always do this to ensure it's in PATH)
+echo "  Activating conda..."
+eval "$(${HOME}/miniconda3/bin/conda shell.bash hook)"
+echo "  Conda version: $(conda --version)"
+
+# Accept Conda ToS (required for non-interactive use)
+echo "  Accepting Conda Terms of Service..."
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
 
 # ---- Step 2: Create conda environment ----
 echo "[Step 2/6] Setting up conda environment..."
@@ -91,7 +93,7 @@ ENV_NAME="groot"
 
 if ! conda env list | grep -q "^${ENV_NAME} "; then
     echo "  Creating ${ENV_NAME} environment..."
-    conda create -n ${ENV_NAME} python=3.10 -y
+    conda create -n ${ENV_NAME} python=3.10 -y --override-channels -c conda-forge
 fi
 
 conda activate ${ENV_NAME}
