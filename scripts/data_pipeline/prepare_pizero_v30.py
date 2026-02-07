@@ -164,49 +164,34 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     # Create PyArrow schema for nested list columns
     print(f"Saving {len(all_frames)} frames with nested list columns...")
 
-    # Build the schema
+    # Build the schema (use variable-length lists like LeRobot reference datasets)
     schema_fields = [
+        pa.field("observation.state", pa.list_(pa.float32())),
+        pa.field("action", pa.list_(pa.float32())),
         pa.field("episode_index", pa.int64()),
         pa.field("frame_index", pa.int64()),
-        pa.field("timestamp", pa.float64()),
-        pa.field("task_index", pa.int64()),
+        pa.field("timestamp", pa.float32()),
+        pa.field("next.done", pa.bool_()),
         pa.field("index", pa.int64()),
+        pa.field("task_index", pa.int64()),
     ]
-
-    if action_dim:
-        # Fixed-size list for actions
-        schema_fields.append(pa.field("action", pa.list_(pa.float32(), action_dim)))
-
-    if state_dim:
-        # Fixed-size list for states
-        schema_fields.append(pa.field("observation.state", pa.list_(pa.float32(), state_dim)))
 
     schema = pa.schema(schema_fields)
 
-    # Convert to PyArrow table
+    # Convert to PyArrow table (use variable-length lists)
+    action_data = [f.get("action", [0.0] * action_dim) for f in all_frames]
+    state_data = [f.get("observation.state", [0.0] * state_dim) for f in all_frames]
+
     arrays = {
+        "observation.state": pa.array(state_data, type=pa.list_(pa.float32())),
+        "action": pa.array(action_data, type=pa.list_(pa.float32())),
         "episode_index": pa.array([f["episode_index"] for f in all_frames], type=pa.int64()),
         "frame_index": pa.array([f["frame_index"] for f in all_frames], type=pa.int64()),
-        "timestamp": pa.array([f["timestamp"] for f in all_frames], type=pa.float64()),
-        "task_index": pa.array([f["task_index"] for f in all_frames], type=pa.int64()),
+        "timestamp": pa.array([f["timestamp"] for f in all_frames], type=pa.float32()),
+        "next.done": pa.array([False] * len(all_frames), type=pa.bool_()),
         "index": pa.array([f["index"] for f in all_frames], type=pa.int64()),
+        "task_index": pa.array([f["task_index"] for f in all_frames], type=pa.int64()),
     }
-
-    if action_dim:
-        # Create fixed-size list array for actions
-        action_data = [f.get("action", [0.0] * action_dim) for f in all_frames]
-        arrays["action"] = pa.FixedSizeListArray.from_arrays(
-            pa.array([x for action in action_data for x in action], type=pa.float32()),
-            action_dim
-        )
-
-    if state_dim:
-        # Create fixed-size list array for states
-        state_data = [f.get("observation.state", [0.0] * state_dim) for f in all_frames]
-        arrays["observation.state"] = pa.FixedSizeListArray.from_arrays(
-            pa.array([x for state in state_data for x in state], type=pa.float32()),
-            state_dim
-        )
 
     # Create table and write to parquet
     table = pa.table(arrays, schema=schema)
