@@ -140,7 +140,8 @@ PYEOF
 # ---- Step 4: Prepare training ----
 echo "[Step 4/6] Preparing training..."
 
-mkdir -p "${OUTPUT_DIR}"
+# Remove existing output directory (LeRobot won't overwrite)
+rm -rf "${OUTPUT_DIR}"
 
 # ---- Step 5: Run training ----
 echo "[Step 5/6] Starting training..."
