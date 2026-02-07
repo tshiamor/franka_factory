@@ -205,37 +205,69 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     tasks_df = pd.DataFrame([{"task_index": 0, "task": TASK_INSTRUCTION}])
     tasks_df.to_parquet(meta_dir / "tasks.parquet", index=False)
 
-    # Build features schema
+    # Build features schema (must include ALL columns in parquet)
     features = {
         f"observation.images.{camera}": {
             "dtype": "video",
             "shape": [IMAGE_SIZE, IMAGE_SIZE, 3],
-            "names": ["height", "width", "channels"],
+            "names": ["height", "width", "channel"],
             "video_info": {
-                "video.fps": fps,
-                "video.codec": "libx264",
+                "video.fps": float(fps),
+                "video.codec": "av1",
                 "video.pix_fmt": "yuv420p",
                 "video.is_depth_map": False,
                 "has_audio": False,
             }
         },
+        "observation.state": {
+            "dtype": "float32",
+            "shape": [state_dim] if state_dim else [1],
+            "names": {"motors": [f"state_{i}" for i in range(state_dim or 1)]},
+            "fps": float(fps),
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": [action_dim] if action_dim else [1],
+            "names": {"motors": [f"action_{i}" for i in range(action_dim or 1)]},
+            "fps": float(fps),
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
+        "frame_index": {
+            "dtype": "int64",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
+        "timestamp": {
+            "dtype": "float32",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
+        "next.done": {
+            "dtype": "bool",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [1],
+            "names": None,
+            "fps": float(fps),
+        },
     }
-
-    # Add action features
-    if action_dim:
-        features["action"] = {
-            "dtype": "float32",
-            "shape": [action_dim],
-            "names": [f"action_{i}" for i in range(action_dim)],
-        }
-
-    # Add state features
-    if state_dim:
-        features["observation.state"] = {
-            "dtype": "float32",
-            "shape": [state_dim],
-            "names": [f"state_{i}" for i in range(state_dim)],
-        }
 
     # Save info.json
     info = {
