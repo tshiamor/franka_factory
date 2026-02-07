@@ -159,21 +159,12 @@ python -c "import lerobot; print(f'LeRobot version: {lerobot.__version__}')" || 
     pip install -e . --no-deps -q
 }
 
-# Run training with LeRobot
+# Clear any cached old dataset versions
+rm -rf ~/.cache/huggingface/lerobot/${HF_DATASET} 2>/dev/null || true
+
+# Run training with LeRobot (single line command for reliability)
 # Uses ACT policy (Action Chunking Transformer) for Pi-Zero style training
-python -m lerobot.scripts.lerobot_train \
-    --policy.type act \
-    --dataset.repo_id "${HF_DATASET}" \
-    --output_dir "${OUTPUT_DIR}" \
-    --batch_size ${BATCH_SIZE} \
-    --steps 100000 \
-    --save_freq 25000 \
-    --log_freq 100 \
-    --policy.chunk_size ${CHUNK_SIZE} \
-    --policy.n_action_steps ${ACTION_HORIZON} \
-    --wandb.enable true \
-    --wandb.project "pizero-mcx-card" \
-    2>&1 | tee "${WORK_DIR}/training.log"
+python -m lerobot.scripts.lerobot_train --policy.type act --dataset.repo_id "${HF_DATASET}" --output_dir "${OUTPUT_DIR}" --batch_size ${BATCH_SIZE} --steps 100000 --save_freq 25000 --log_freq 100 --policy.chunk_size ${CHUNK_SIZE} --policy.n_action_steps ${ACTION_HORIZON} --policy.repo_id "${HF_MODEL_REPO}" --wandb.enable false 2>&1 | tee "${WORK_DIR}/training.log"
 
 # ---- Step 6: Upload to HuggingFace ----
 echo "[Step 6/6] Uploading trained model to HuggingFace..."

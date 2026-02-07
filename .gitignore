@@ -54,3 +54,4 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+scripts/data_pipeline/pizero_v30_data/
