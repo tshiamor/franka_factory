@@ -12,12 +12,19 @@ The key insight: Cosmos preserves motion/structure while changing visual appeara
 so original actions/states remain valid for augmented videos.
 
 Usage:
+    # Pull BOTH datasets from HuggingFace and merge:
+    python reconstruct_augmented_hdf5.py \
+        --original_repo tshiamor/mcx-card-demos-vla \
+        --augmented_repo tshiamor/mcx-card-cosmos-augmented \
+        --output_hdf5 ./mcx_card_augmented_full.hdf5
+
+    # Or use local original HDF5 + HuggingFace augmented:
     python reconstruct_augmented_hdf5.py \
         --original_hdf5 /path/to/mcx_card_demos_vla_224.hdf5 \
         --augmented_repo tshiamor/mcx-card-cosmos-augmented \
         --output_hdf5 ./mcx_card_augmented_full.hdf5
 
-    # Or from local augmented videos:
+    # Or fully local:
     python reconstruct_augmented_hdf5.py \
         --original_hdf5 /path/to/mcx_card_demos_vla_224.hdf5 \
         --augmented_dir ./cosmos_augmented/videos \
@@ -38,7 +45,8 @@ from tqdm import tqdm
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Reconstruct HDF5 with augmented videos + original states")
-    parser.add_argument("--original_hdf5", type=str, required=True, help="Original HDF5 with states/actions")
+    parser.add_argument("--original_hdf5", type=str, default=None, help="Local path to original HDF5 with states/actions")
+    parser.add_argument("--original_repo", type=str, default=None, help="HuggingFace repo with original HDF5 (e.g., tshiamor/mcx-card-demos-vla)")
     parser.add_argument("--augmented_repo", type=str, default=None, help="HuggingFace repo with augmented videos")
     parser.add_argument("--augmented_dir", type=str, default=None, help="Local dir with augmented videos")
     parser.add_argument("--output_hdf5", type=str, required=True, help="Output HDF5 path")
@@ -46,6 +54,27 @@ def parse_args():
     parser.add_argument("--include_originals", action="store_true", default=True, help="Include original demos too")
     parser.add_argument("--max_episodes", type=int, default=None)
     return parser.parse_args()
+
+
+def download_original_hdf5(repo_id: str, local_dir: str) -> str:
+    """Download original HDF5 from HuggingFace."""
+    from huggingface_hub import snapshot_download
+
+    print(f"Downloading original dataset from {repo_id}...")
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=local_dir,
+        allow_patterns=["*.hdf5"],
+    )
+
+    # Find HDF5 file
+    hdf5_files = list(Path(local_dir).glob("*.hdf5"))
+    if hdf5_files:
+        print(f"Found HDF5: {hdf5_files[0]}")
+        return str(hdf5_files[0])
+
+    return None
 
 
 def download_augmented_videos(repo_id: str, local_dir: str) -> str:
@@ -152,13 +181,26 @@ def main():
     args = parse_args()
 
     # Validate inputs
-    if not os.path.exists(args.original_hdf5):
-        print(f"Error: Original HDF5 not found: {args.original_hdf5}")
+    if args.original_hdf5 is None and args.original_repo is None:
+        print("Error: Must specify --original_hdf5 (local path) or --original_repo (HuggingFace)")
         return 1
 
     if args.augmented_repo is None and args.augmented_dir is None:
         print("Error: Must specify --augmented_repo or --augmented_dir")
         return 1
+
+    # Get original HDF5
+    if args.original_repo:
+        download_dir = Path(args.output_hdf5).parent / "original_download"
+        original_hdf5 = download_original_hdf5(args.original_repo, str(download_dir))
+        if not original_hdf5:
+            print(f"Error: Could not find HDF5 in {args.original_repo}")
+            return 1
+    else:
+        original_hdf5 = args.original_hdf5
+        if not os.path.exists(original_hdf5):
+            print(f"Error: Original HDF5 not found: {original_hdf5}")
+            return 1
 
     # Get augmented videos
     if args.augmented_repo:
@@ -178,12 +220,12 @@ def main():
     print(f"Found augmented videos for {len(augmented_map)} demos")
 
     # Load original HDF5 and create output
-    print(f"Loading original HDF5: {args.original_hdf5}")
+    print(f"Loading original HDF5: {original_hdf5}")
 
     output_dir = Path(args.output_hdf5).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with h5py.File(args.original_hdf5, "r") as f_in:
+    with h5py.File(original_hdf5, "r") as f_in:
         with h5py.File(args.output_hdf5, "w") as f_out:
             # Copy attributes
             for attr_name, attr_value in f_in.attrs.items():
