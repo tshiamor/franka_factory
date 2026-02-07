@@ -48,6 +48,8 @@ def parse_args():
     parser.add_argument("--original_hdf5", type=str, default=None, help="Local path to original HDF5 with states/actions")
     parser.add_argument("--original_repo", type=str, default=None, help="HuggingFace repo with original HDF5 (e.g., tshiamor/mcx-card-demos-vla)")
     parser.add_argument("--augmented_repo", type=str, default=None, help="HuggingFace repo with augmented videos")
+    parser.add_argument("--push_to_hub", action="store_true", help="Upload merged dataset to HuggingFace")
+    parser.add_argument("--hub_repo_id", type=str, default=None, help="HuggingFace repo for upload (e.g., tshiamor/mcx-card-training-full)")
     parser.add_argument("--augmented_dir", type=str, default=None, help="Local dir with augmented videos")
     parser.add_argument("--output_hdf5", type=str, required=True, help="Output HDF5 path")
     parser.add_argument("--cameras", type=str, nargs="+", default=["wrist_rgb", "table_rgb"])
@@ -338,6 +340,36 @@ def main():
         augmented_count = len([n for n in ep_names if "_aug" in n])
         print(f"  Original episodes: {original_count}")
         print(f"  Augmented episodes: {augmented_count}")
+
+    # Upload to HuggingFace if requested
+    if args.push_to_hub:
+        if not args.hub_repo_id:
+            print("\nError: --hub_repo_id required when using --push_to_hub")
+            return 1
+
+        try:
+            from huggingface_hub import HfApi
+
+            print(f"\nUploading to HuggingFace: {args.hub_repo_id}...")
+            api = HfApi()
+
+            # Create repo if doesn't exist
+            api.create_repo(repo_id=args.hub_repo_id, repo_type="dataset", exist_ok=True)
+
+            # Upload HDF5 file
+            api.upload_file(
+                path_or_fileobj=args.output_hdf5,
+                path_in_repo=Path(args.output_hdf5).name,
+                repo_id=args.hub_repo_id,
+                repo_type="dataset",
+                commit_message=f"Upload merged dataset ({original_count} original + {augmented_count} augmented episodes)",
+            )
+
+            print(f"Upload complete: https://huggingface.co/datasets/{args.hub_repo_id}")
+
+        except Exception as e:
+            print(f"Upload failed: {e}")
+            return 1
 
     return 0
 

@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Prepare MCX Card demos for NVIDIA GR00T N1 training.
+Prepare MCX Card demos for NVIDIA GR00T N1.6 training.
 
-GR00T expects:
-- RGB images (224×224)
-- Actions (7D for Franka: 6 DoF + gripper)
+GR00T N1.6 uses LeRobot-compatible format with:
+- RGB images (224×224 or 256×256)
+- Actions with action chunking (default horizon: 16)
 - Robot proprioception (joint positions, velocities, EEF pose)
-- Language annotations
+- Language annotations for task conditioning
+- Support for multi-camera setups
 
 Usage:
     # From HuggingFace augmented dataset
@@ -23,6 +24,13 @@ Usage:
         --source local \
         --hdf5_path /path/to/mcx_card_demos_vla_224.hdf5 \
         --output_dir ./groot_data
+
+    # With multiple cameras for GR00T N1.6
+    python prepare_groot.py \
+        --source local \
+        --hdf5_path /path/to/demos.hdf5 \
+        --output_dir ./groot_data \
+        --cameras wrist_rgb table_rgb
 """
 
 import argparse
@@ -37,7 +45,7 @@ from tqdm import tqdm
 
 TASK_DESCRIPTION = "Pick up the blue block and place it on the target platform near the MCX network cards."
 
-# GR00T robot configuration for Franka Panda
+# GR00T N1.6 robot configuration for Franka Panda
 ROBOT_CONFIG = {
     "robot_type": "franka_panda",
     "num_joints": 7,
@@ -56,17 +64,30 @@ ROBOT_CONFIG = {
     },
 }
 
+# GR00T N1.6 specific settings
+GROOT_N16_CONFIG = {
+    "model_version": "n1.6",
+    "action_horizon": 16,  # Action chunk size
+    "observation_horizon": 2,  # History frames
+    "image_size": 224,
+    "use_language_conditioning": True,
+    "supported_embodiments": ["franka", "ur", "so100", "gr1"],
+}
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Prepare data for NVIDIA GR00T")
+    parser = argparse.ArgumentParser(description="Prepare data for NVIDIA GR00T N1.6")
     parser.add_argument("--source", type=str, choices=["huggingface", "local"], default="local")
     parser.add_argument("--repo_id", type=str, default="tshiamor/mcx-card-demos-vla")
     parser.add_argument("--hdf5_path", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="./groot_data")
-    parser.add_argument("--camera", type=str, default="wrist_rgb")
+    parser.add_argument("--camera", type=str, default="wrist_rgb", help="Primary camera (for single-camera)")
+    parser.add_argument("--cameras", type=str, nargs="+", default=None, help="Multiple cameras for N1.6 (e.g., wrist_rgb table_rgb)")
     parser.add_argument("--max_episodes", type=int, default=None)
     parser.add_argument("--train_split", type=float, default=0.9)
-    parser.add_argument("--chunk_size", type=int, default=100, help="Episodes per HDF5 chunk")
+    parser.add_argument("--action_horizon", type=int, default=16, help="Action chunk size for N1.6")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push to HuggingFace Hub")
+    parser.add_argument("--hub_repo_id", type=str, default=None, help="HuggingFace repo ID")
     return parser.parse_args()
 
 
@@ -87,37 +108,46 @@ def download_from_huggingface(repo_id: str, local_dir: str):
     return None
 
 
-def create_groot_episode(ep_data: dict, camera: str) -> dict:
-    """Convert episode to GR00T format."""
+def create_groot_episode(ep_data: dict, cameras: list, action_horizon: int = 16) -> dict:
+    """Convert episode to GR00T N1.6 format with multi-camera support."""
 
     obs = ep_data.get("obs", {})
     actions = ep_data.get("actions", np.array([]))
 
-    if camera not in obs:
+    # Check at least one camera exists
+    available_cameras = [c for c in cameras if c in obs]
+    if not available_cameras:
         return None
 
-    images = obs[camera]
+    # Use first available camera to determine num_steps
+    primary_camera = available_cameras[0]
+    images = obs[primary_camera]
     num_steps = len(images)
 
     if num_steps == 0:
         return None
 
-    # Ensure images are uint8
-    if images.dtype != np.uint8:
-        if images.max() <= 1.0:
-            images = (images * 255).astype(np.uint8)
-        else:
-            images = images.astype(np.uint8)
-
     episode = {
-        "observation": {
-            "image": images,
-        },
+        "observation": {},
         "action": actions[:num_steps] if len(actions) >= num_steps else np.zeros((num_steps, 7)),
         "language": TASK_DESCRIPTION,
         "done": np.zeros(num_steps, dtype=bool),
         "reward": np.zeros(num_steps, dtype=np.float32),
     }
+
+    # Add all available camera images
+    for camera in available_cameras:
+        cam_images = obs[camera][:num_steps]
+        # Ensure images are uint8
+        if cam_images.dtype != np.uint8:
+            if cam_images.max() <= 1.0:
+                cam_images = (cam_images * 255).astype(np.uint8)
+            else:
+                cam_images = cam_images.astype(np.uint8)
+        episode["observation"][f"image_{camera}"] = cam_images
+
+    # For backwards compatibility, also store primary as "image"
+    episode["observation"]["image"] = episode["observation"][f"image_{primary_camera}"]
 
     episode["done"][-1] = True
     episode["reward"][-1] = 1.0  # Success reward at end
@@ -128,19 +158,33 @@ def create_groot_episode(ep_data: dict, camera: str) -> dict:
             data = obs[key][:num_steps]
             episode["observation"][key] = data
 
+    # Create action chunks for N1.6 (overlapping windows)
+    if action_horizon > 1 and len(actions) >= num_steps:
+        action_chunks = []
+        for t in range(num_steps):
+            chunk = actions[t:t + action_horizon]
+            # Pad if needed
+            if len(chunk) < action_horizon:
+                padding = np.tile(chunk[-1:], (action_horizon - len(chunk), 1))
+                chunk = np.concatenate([chunk, padding], axis=0)
+            action_chunks.append(chunk)
+        episode["action_chunk"] = np.array(action_chunks)
+
     return episode
 
 
-def save_groot_hdf5(episodes: list, output_path: str, split: str = "train"):
-    """Save episodes in GR00T HDF5 format."""
+def save_groot_hdf5(episodes: list, output_path: str, split: str = "train", action_horizon: int = 16):
+    """Save episodes in GR00T N1.6 HDF5 format."""
 
     with h5py.File(output_path, "w") as f:
-        # Metadata
-        f.attrs["format"] = "groot_v1"
+        # Metadata for N1.6
+        f.attrs["format"] = "groot_n1.6"
         f.attrs["robot_type"] = ROBOT_CONFIG["robot_type"]
         f.attrs["num_episodes"] = len(episodes)
         f.attrs["split"] = split
         f.attrs["task_description"] = TASK_DESCRIPTION
+        f.attrs["action_horizon"] = action_horizon
+        f.attrs["model_version"] = "n1.6"
 
         # Create groups
         data_group = f.create_group("data")
@@ -152,23 +196,29 @@ def save_groot_hdf5(episodes: list, output_path: str, split: str = "train"):
             # Observations
             obs_group = ep_group.create_group("observation")
 
-            # Images - store compressed
-            images = episode["observation"]["image"]
-            obs_group.create_dataset(
-                "image",
-                data=images,
-                compression="gzip",
-                compression_opts=4,
-                chunks=(1, 224, 224, 3),
-            )
+            # Images - store all cameras compressed
+            for key in episode["observation"]:
+                if key.startswith("image"):
+                    images = episode["observation"][key]
+                    obs_group.create_dataset(
+                        key,
+                        data=images,
+                        compression="gzip",
+                        compression_opts=4,
+                        chunks=(1, 224, 224, 3),
+                    )
 
             # Proprioception
             for key in ["eef_pos", "eef_quat", "joint_pos", "joint_vel", "gripper_pos"]:
                 if key in episode["observation"]:
                     obs_group.create_dataset(key, data=episode["observation"][key])
 
-            # Actions
+            # Actions (single-step)
             ep_group.create_dataset("action", data=episode["action"])
+
+            # Action chunks for N1.6
+            if "action_chunk" in episode:
+                ep_group.create_dataset("action_chunk", data=episode["action_chunk"])
 
             # Done and reward
             ep_group.create_dataset("done", data=episode["done"])
@@ -176,7 +226,7 @@ def save_groot_hdf5(episodes: list, output_path: str, split: str = "train"):
 
             # Language
             ep_group.attrs["language"] = episode["language"]
-            ep_group.attrs["num_steps"] = len(images)
+            ep_group.attrs["num_steps"] = len(episode["observation"]["image"])
 
     print(f"Saved {len(episodes)} episodes to {output_path}")
 
@@ -219,51 +269,95 @@ def save_groot_tfrecord(episodes: list, output_dir: str, split: str = "train"):
     print(f"Saved TFRecord to {output_path}")
 
 
-def create_groot_metadata(output_dir: str, train_episodes: int, val_episodes: int):
-    """Create metadata files for GR00T training."""
+def create_groot_metadata(output_dir: str, train_episodes: int, val_episodes: int,
+                          cameras: list, action_horizon: int = 16):
+    """Create metadata files for GR00T N1.6 training."""
 
     metadata = {
         "dataset_name": "mcx_card_block_insert",
         "task_description": TASK_DESCRIPTION,
         "robot_config": ROBOT_CONFIG,
+        "groot_version": "n1.6",
         "splits": {
             "train": {"num_episodes": train_episodes},
             "val": {"num_episodes": val_episodes},
         },
         "total_episodes": train_episodes + val_episodes,
         "modalities": ["rgb", "proprioception", "action", "language"],
+        "cameras": cameras,
+        "action_horizon": action_horizon,
     }
 
     with open(Path(output_dir) / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
-    # GR00T config file
+    # GR00T N1.6 config file
     groot_config = {
         "model": {
-            "type": "groot_n1",
+            "type": "groot_n1.6",
             "image_size": 224,
             "patch_size": 14,
             "action_dim": 7,
-            "proprio_dim": 22,  # 9 joint_pos + 9 joint_vel + 3 eef_pos + 4 eef_quat - 3 overlap
+            "proprio_dim": 16,  # 7 joint_pos + 2 gripper + 3 eef_pos + 4 eef_quat
+            "num_cameras": len(cameras),
         },
         "training": {
             "batch_size": 32,
             "learning_rate": 1e-4,
+            "weight_decay": 0.01,
             "epochs": 100,
-            "action_horizon": 16,
+            "action_horizon": action_horizon,
             "observation_horizon": 2,
+            "warmup_steps": 1000,
+            "gradient_accumulation_steps": 1,
         },
         "data": {
             "train_path": "train.hdf5",
             "val_path": "val.hdf5",
-            "image_key": "observation/image",
+            "image_keys": [f"observation/image_{cam}" for cam in cameras],
             "action_key": "action",
+            "action_chunk_key": "action_chunk",
+            "language_key": "language",
+        },
+        "embodiment": {
+            "robot": "franka_panda",
+            "gripper": "franka_hand",
+            "control_mode": "ee_pose_delta",
         },
     }
 
     with open(Path(output_dir) / "groot_config.yaml", "w") as f:
         import yaml
         yaml.dump(groot_config, f, default_flow_style=False)
+
+    # Create LeRobot-compatible config for N1.6
+    lerobot_config = {
+        "fps": 30,
+        "robot_type": "franka_panda",
+        "features": {
+            **{f"observation.images.{cam}": {
+                "dtype": "video",
+                "shape": [224, 224, 3],
+                "names": ["height", "width", "channels"],
+            } for cam in cameras},
+            "observation.state": {
+                "dtype": "float32",
+                "shape": [16],
+                "names": ["joint_pos_0", "joint_pos_1", "joint_pos_2", "joint_pos_3",
+                         "joint_pos_4", "joint_pos_5", "joint_pos_6", "gripper_pos_0",
+                         "gripper_pos_1", "eef_x", "eef_y", "eef_z",
+                         "eef_quat_w", "eef_quat_x", "eef_quat_y", "eef_quat_z"],
+            },
+            "action": {
+                "dtype": "float32",
+                "shape": [7],
+                "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
+            },
+        },
+    }
+
+    with open(Path(output_dir) / "lerobot_config.json", "w") as f:
+        json.dump(lerobot_config, f, indent=2)
 
     print(f"Created metadata and config files in {output_dir}")
 
@@ -273,6 +367,10 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine cameras to use
+    cameras = args.cameras if args.cameras else [args.camera]
+    print(f"Using cameras: {cameras}")
 
     # Get HDF5 path
     if args.source == "huggingface":
@@ -309,7 +407,7 @@ def main():
                 for key in ep_group["obs"].keys():
                     ep_data["obs"][key] = np.array(ep_group["obs"][key])
 
-            episode = create_groot_episode(ep_data, args.camera)
+            episode = create_groot_episode(ep_data, cameras, args.action_horizon)
             if episode:
                 episodes.append(episode)
 
@@ -322,18 +420,40 @@ def main():
 
     print(f"Train: {len(train_episodes)}, Val: {len(val_episodes)}")
 
-    # Save in GR00T HDF5 format
-    save_groot_hdf5(train_episodes, str(output_dir / "train.hdf5"), split="train")
-    save_groot_hdf5(val_episodes, str(output_dir / "val.hdf5"), split="val")
+    # Save in GR00T N1.6 HDF5 format
+    save_groot_hdf5(train_episodes, str(output_dir / "train.hdf5"), split="train",
+                    action_horizon=args.action_horizon)
+    save_groot_hdf5(val_episodes, str(output_dir / "val.hdf5"), split="val",
+                    action_horizon=args.action_horizon)
 
     # Create metadata
-    create_groot_metadata(str(output_dir), len(train_episodes), len(val_episodes))
+    create_groot_metadata(str(output_dir), len(train_episodes), len(val_episodes),
+                          cameras, args.action_horizon)
 
-    print(f"\nGR00T dataset prepared at: {output_dir}")
+    print(f"\nGR00T N1.6 dataset prepared at: {output_dir}")
     print(f"  - train.hdf5: {len(train_episodes)} episodes")
     print(f"  - val.hdf5: {len(val_episodes)} episodes")
     print(f"  - metadata.json: dataset configuration")
-    print(f"  - groot_config.yaml: training configuration")
+    print(f"  - groot_config.yaml: N1.6 training configuration")
+    print(f"  - lerobot_config.json: LeRobot-compatible config")
+
+    # Push to HuggingFace if requested
+    if args.push_to_hub and args.hub_repo_id:
+        try:
+            from huggingface_hub import HfApi
+
+            print(f"\nUploading to HuggingFace: {args.hub_repo_id}...")
+            api = HfApi()
+            api.create_repo(repo_id=args.hub_repo_id, repo_type="dataset", exist_ok=True)
+            api.upload_folder(
+                folder_path=str(output_dir),
+                repo_id=args.hub_repo_id,
+                repo_type="dataset",
+                commit_message=f"Upload GR00T N1.6 dataset ({len(train_episodes)} train + {len(val_episodes)} val)",
+            )
+            print(f"Uploaded to https://huggingface.co/datasets/{args.hub_repo_id}")
+        except Exception as e:
+            print(f"Upload failed: {e}")
 
     return 0
 
