@@ -380,8 +380,14 @@ AUGEOF
 
 # ---- Step 6: Run augmentation (parallel across GPUs) ----
 echo "[Step 6/7] Running augmentation across ${NUM_GPUS} GPUs in parallel..."
-VIDEO_COUNT=$(ls "${DATASET_DIR}/videos/"*.mp4 2>/dev/null | wc -l || echo "430")
-echo "  Each GPU processes ~$((VIDEO_COUNT / NUM_GPUS)) videos with ${NUM_AUGMENTATIONS} augmentation(s) each."
+TOTAL_AVAILABLE=$(ls "${DATASET_DIR}/videos/"*.mp4 2>/dev/null | wc -l || echo "430")
+if [ "${MAX_VIDEOS}" -gt 0 ] && [ "${MAX_VIDEOS}" -lt "${TOTAL_AVAILABLE}" ]; then
+    VIDEO_COUNT="${MAX_VIDEOS}"
+else
+    VIDEO_COUNT="${TOTAL_AVAILABLE}"
+fi
+echo "  Processing ${VIDEO_COUNT} of ${TOTAL_AVAILABLE} videos with ${NUM_AUGMENTATIONS} augmentation(s) each."
+echo "  Each GPU processes ~$((VIDEO_COUNT / NUM_GPUS)) videos."
 echo "  Videos trimmed to ${MAX_FRAMES} frames."
 echo ""
 
@@ -477,9 +483,13 @@ for GPU_ID in $(seq 0 $((NUM_GPUS - 1))); do
 done
 
 TOTAL_VIDEOS=$(ls "${FINAL_OUTPUT}/videos/"*.mp4 2>/dev/null | wc -l)
+EXPECTED_VIDEOS=$((VIDEO_COUNT * (NUM_AUGMENTATIONS + 1)))
 echo "  Augmentation complete."
 echo "  Total output videos: ${TOTAL_VIDEOS}"
-echo "  Expected: $((VIDEO_COUNT * (NUM_AUGMENTATIONS + 1))) (originals + augmented)"
+echo "  Expected: ${EXPECTED_VIDEOS} (${VIDEO_COUNT} originals + $((VIDEO_COUNT * NUM_AUGMENTATIONS)) augmented)"
+if [ "${TOTAL_VIDEOS}" -ne "${EXPECTED_VIDEOS}" ]; then
+    echo "  WARNING: Output count mismatch. Check shard logs for failures."
+fi
 
 # ---- Step 7: Upload to HuggingFace ----
 echo "[Step 7/7] Uploading results to HuggingFace..."
