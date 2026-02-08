@@ -199,23 +199,44 @@ class GROOTConfig:
 
 
 class GROOTDataset(Dataset):
-    """Dataset loader for GR00T N1.6 HDF5 format."""
+    """Dataset loader for GR00T N1.6 HDF5 format.
+
+    Expected HDF5 structure (from prepare_groot.py):
+        data/episode_XXXXXX/observation/image_wrist_rgb
+        data/episode_XXXXXX/observation/image_table_rgb
+        data/episode_XXXXXX/observation/eef_pos
+        data/episode_XXXXXX/observation/joint_pos
+        data/episode_XXXXXX/action
+        data/episode_XXXXXX/action_chunk
+        data/episode_XXXXXX.attrs['language']
+    """
 
     def __init__(self, hdf5_path, config):
         self.config = config
         self.hdf5_path = hdf5_path
         self.h5file = h5py.File(hdf5_path, 'r')
 
-        # Get all episode keys
-        self.episode_keys = list(self.h5file.keys())
+        # Episodes are under 'data/' group
+        if 'data' in self.h5file:
+            self.data_group = self.h5file['data']
+        else:
+            self.data_group = self.h5file  # Fallback to root
+
+        self.episode_keys = list(self.data_group.keys())
         print(f"Loaded {len(self.episode_keys)} episodes")
 
         # Build sample index
         self.samples = []
         for ep_key in self.episode_keys:
-            ep = self.h5file[ep_key]
-            num_steps = ep['actions'].shape[0]
-            for t in range(num_steps - config.action_horizon):
+            ep = self.data_group[ep_key]
+            # Actions are under 'action' (singular) not 'actions'
+            if 'action' in ep:
+                num_steps = ep['action'].shape[0]
+            elif 'action_chunk' in ep:
+                num_steps = ep['action_chunk'].shape[0]
+            else:
+                continue
+            for t in range(max(0, num_steps - config.action_horizon)):
                 self.samples.append((ep_key, t))
 
         print(f"Total samples: {len(self.samples)}")
@@ -225,29 +246,54 @@ class GROOTDataset(Dataset):
 
     def __getitem__(self, idx):
         ep_key, t = self.samples[idx]
-        ep = self.h5file[ep_key]
+        ep = self.data_group[ep_key]
+        obs = ep['observation'] if 'observation' in ep else ep
 
         # Get observation images (multi-camera)
+        # Images are under observation/image_wrist_rgb, observation/image_table_rgb
         images = {}
         for cam in ['wrist_rgb', 'table_rgb']:
-            if cam in ep:
-                img = ep[cam][t]
+            img_key = f'image_{cam}'
+            if img_key in obs:
+                img = obs[img_key][t]
                 # Normalize to [-1, 1]
                 img = img.astype(np.float32) / 127.5 - 1.0
                 img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
                 images[cam] = torch.from_numpy(img)
+            elif cam in obs:  # Fallback to direct camera name
+                img = obs[cam][t]
+                img = img.astype(np.float32) / 127.5 - 1.0
+                img = np.transpose(img, (2, 0, 1))
+                images[cam] = torch.from_numpy(img)
 
-        # Get robot state
-        state = ep['robot_state'][t] if 'robot_state' in ep else np.zeros(9)
+        # Get robot state (concatenate eef_pos, eef_quat, joint_pos if available)
+        state_parts = []
+        for key in ['eef_pos', 'eef_quat', 'joint_pos', 'gripper_pos']:
+            if key in obs:
+                state_parts.append(obs[key][t])
+        if state_parts:
+            state = np.concatenate(state_parts)
+        else:
+            state = np.zeros(9)
         state = torch.from_numpy(state.astype(np.float32))
 
         # Get action chunk
-        action_chunk = ep['action_chunk'][t] if 'action_chunk' in ep else \
-                       ep['actions'][t:t + self.config.action_horizon]
+        if 'action_chunk' in ep:
+            action_chunk = ep['action_chunk'][t]
+        elif 'action' in ep:
+            actions = ep['action'][:]
+            action_chunk = actions[t:t + self.config.action_horizon]
+            # Pad if needed
+            if len(action_chunk) < self.config.action_horizon:
+                pad = np.tile(action_chunk[-1:], (self.config.action_horizon - len(action_chunk), 1))
+                action_chunk = np.concatenate([action_chunk, pad], axis=0)
+        else:
+            action_chunk = np.zeros((self.config.action_horizon, self.config.action_dim))
         action_chunk = torch.from_numpy(action_chunk.astype(np.float32))
 
-        # Language instruction (if available)
-        lang = ep.attrs.get('language_instruction', 'Pick up the block and place it on the target')
+        # Language instruction
+        lang = ep.attrs.get('language', ep.attrs.get('language_instruction',
+               'Pick up the block and place it on the target'))
 
         return {
             'images': images,

@@ -151,21 +151,123 @@ cat > "${WORK_DIR}/train_openvla.py" << 'TRAINEOF'
 #!/usr/bin/env python3
 """
 Fine-tune OpenVLA on MCX Card manipulation dataset.
-Uses RLDS format data with language instructions.
+
+Dataset structure (from prepare_openvla.py):
+    train/episode_XXXX/images.npy      - (T, 224, 224, 3) uint8
+    train/episode_XXXX/actions.npy     - (T, 7) float32
+    train/episode_XXXX/metadata.json   - {language_instruction, num_steps, ...}
+    train/episode_XXXX/eef_pos.npy     - (T, 3) float32 (optional)
 """
 
 import os
 import json
+import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+from PIL import Image
 from transformers import (
     AutoModelForVision2Seq,
     AutoProcessor,
-    TrainingArguments,
-    Trainer,
 )
-from datasets import load_from_disk
+from tqdm import tqdm
 import wandb
+
+
+class OpenVLADataset(Dataset):
+    """Dataset loader for OpenVLA numpy file format."""
+
+    def __init__(self, data_dir, processor):
+        self.data_dir = Path(data_dir)
+        self.processor = processor
+
+        # Find all episode directories
+        self.episodes = sorted([
+            d for d in self.data_dir.iterdir()
+            if d.is_dir() and d.name.startswith("episode_")
+        ])
+        print(f"Found {len(self.episodes)} episodes in {data_dir}")
+
+        # Build sample index (episode_idx, step_idx)
+        self.samples = []
+        for ep_idx, ep_dir in enumerate(self.episodes):
+            metadata_path = ep_dir / "metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path) as f:
+                    meta = json.load(f)
+                num_steps = meta.get("num_steps", 0)
+            else:
+                # Fallback: check images.npy shape
+                images_path = ep_dir / "images.npy"
+                if images_path.exists():
+                    images = np.load(images_path, mmap_mode='r')
+                    num_steps = len(images)
+                else:
+                    continue
+
+            for t in range(num_steps):
+                self.samples.append((ep_idx, t))
+
+        print(f"Total samples: {len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        ep_idx, t = self.samples[idx]
+        ep_dir = self.episodes[ep_idx]
+
+        # Load image
+        images = np.load(ep_dir / "images.npy", mmap_mode='r')
+        image = images[t]  # (224, 224, 3) uint8
+
+        # Load action
+        actions = np.load(ep_dir / "actions.npy")
+        action = actions[t] if t < len(actions) else np.zeros(7, dtype=np.float32)
+
+        # Load language instruction
+        metadata_path = ep_dir / "metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            instruction = meta.get("language_instruction",
+                "Pick up the blue block and place it on the target")
+        else:
+            instruction = "Pick up the blue block and place it on the target"
+
+        # Convert image to PIL for processor
+        pil_image = Image.fromarray(image)
+
+        # Process with OpenVLA processor
+        inputs = self.processor(
+            images=pil_image,
+            text=instruction,
+            return_tensors="pt",
+            padding=True,
+        )
+
+        # Flatten batch dimension (processor adds it)
+        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
+
+        # Add action as label
+        inputs["labels"] = torch.tensor(action, dtype=torch.float32)
+
+        return inputs
+
+
+def collate_fn(batch):
+    """Custom collate function for OpenVLA batches."""
+    # Stack all tensors
+    result = {}
+    for key in batch[0].keys():
+        if key == "labels":
+            result[key] = torch.stack([item[key] for item in batch])
+        elif isinstance(batch[0][key], torch.Tensor):
+            result[key] = torch.stack([item[key] for item in batch])
+        else:
+            result[key] = [item[key] for item in batch]
+    return result
+
 
 def main():
     # Configuration
@@ -187,63 +289,134 @@ def main():
     wandb.init(project="openvla-mcx-card", name="finetune")
 
     # Load model and processor
-    print("Loading model...")
+    print("Loading OpenVLA model...")
     processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
     model = AutoModelForVision2Seq.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto",
     )
 
-    # Load dataset
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    # Enable gradient checkpointing to save memory
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+
+    # Load datasets
     print("Loading dataset...")
-    train_dataset = load_from_disk(str(dataset_dir / "train"))
-    val_dataset = load_from_disk(str(dataset_dir / "val")) if (dataset_dir / "val").exists() else None
+    train_dataset = OpenVLADataset(dataset_dir / "train", processor)
+    val_dataset = OpenVLADataset(dataset_dir / "val", processor) if (dataset_dir / "val").exists() else None
 
-    print(f"Train samples: {len(train_dataset)}")
-    if val_dataset:
-        print(f"Val samples: {len(val_dataset)}")
-
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        num_train_epochs=num_epochs,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        gradient_accumulation_steps=4,
-        learning_rate=learning_rate,
-        warmup_ratio=0.1,
-        logging_steps=10,
-        save_steps=500,
-        eval_steps=500 if val_dataset else None,
-        evaluation_strategy="steps" if val_dataset else "no",
-        save_total_limit=3,
-        bf16=True,
-        dataloader_num_workers=4,
-        report_to="wandb",
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate_fn,
+        pin_memory=True,
     )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=collate_fn,
+    ) if val_dataset else None
 
-    # Create trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=processor,
-    )
+    # Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    num_training_steps = len(train_loader) * num_epochs
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_training_steps)
 
-    # Train
+    # Training loop
     print("Starting training...")
-    trainer.train()
+    global_step = 0
+    best_val_loss = float('inf')
+
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0.0
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        for batch in pbar:
+            # Move to device
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+
+            # Forward pass
+            outputs = model(
+                input_ids=batch.get("input_ids"),
+                attention_mask=batch.get("attention_mask"),
+                pixel_values=batch.get("pixel_values"),
+                labels=batch.get("input_ids"),  # For language modeling
+            )
+
+            loss = outputs.loss
+
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+
+            epoch_loss += loss.item()
+            global_step += 1
+
+            pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
+
+            if global_step % 100 == 0:
+                wandb.log({
+                    "train_loss": loss.item(),
+                    "lr": scheduler.get_last_lr()[0],
+                    "step": global_step,
+                })
+
+        avg_train_loss = epoch_loss / len(train_loader)
+        print(f"Epoch {epoch+1}: avg_train_loss={avg_train_loss:.4f}")
+        wandb.log({"epoch": epoch + 1, "avg_train_loss": avg_train_loss})
+
+        # Validation
+        if val_loader and (epoch + 1) % 2 == 0:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in batch.items()}
+                    outputs = model(
+                        input_ids=batch.get("input_ids"),
+                        attention_mask=batch.get("attention_mask"),
+                        pixel_values=batch.get("pixel_values"),
+                        labels=batch.get("input_ids"),
+                    )
+                    val_loss += outputs.loss.item()
+
+            avg_val_loss = val_loss / len(val_loader)
+            print(f"  val_loss={avg_val_loss:.4f}")
+            wandb.log({"val_loss": avg_val_loss})
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                model.save_pretrained(output_dir / "best")
+                processor.save_pretrained(output_dir / "best")
+                print(f"  Saved best model")
+
+        # Save checkpoint
+        if (epoch + 1) % 5 == 0:
+            model.save_pretrained(output_dir / f"checkpoint-{epoch+1}")
+            processor.save_pretrained(output_dir / f"checkpoint-{epoch+1}")
 
     # Save final model
-    print("Saving model...")
-    trainer.save_model(str(output_dir / "final"))
-    processor.save_pretrained(str(output_dir / "final"))
+    print("Saving final model...")
+    model.save_pretrained(output_dir / "final")
+    processor.save_pretrained(output_dir / "final")
 
     print("Training complete!")
     wandb.finish()
+
 
 if __name__ == "__main__":
     main()
