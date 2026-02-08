@@ -60,8 +60,38 @@ echo ""
 # ---- Step 1: Install system dependencies + conda ----
 echo "[Step 1/5] Installing system dependencies..."
 sudo apt-get update -qq || echo "  Warning: apt-get update had errors"
-sudo apt-get install -y -qq git git-lfs curl wget ffmpeg libgl1-mesa-glx cmake build-essential libegl1-mesa-dev > /dev/null 2>&1 || true
-git lfs install || true
+sudo apt-get install -y git git-lfs curl wget ffmpeg libgl1-mesa-glx cmake build-essential libegl1-mesa-dev 2>/dev/null || true
+
+# Install git-lfs explicitly
+echo "  Setting up git-lfs..."
+if ! command -v git-lfs &>/dev/null; then
+    curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | sudo bash 2>/dev/null || true
+    sudo apt-get install -y git-lfs 2>/dev/null || true
+fi
+git lfs install 2>/dev/null || true
+
+# Set up CUDA environment (required for flash-attn)
+echo "  Detecting CUDA..."
+if [ -z "${CUDA_HOME:-}" ]; then
+    # Common CUDA locations
+    for cuda_path in /usr/local/cuda /usr/local/cuda-12.1 /usr/local/cuda-12.2 /usr/local/cuda-12.3 /usr/local/cuda-12.4 /usr/lib/cuda; do
+        if [ -d "$cuda_path" ]; then
+            export CUDA_HOME="$cuda_path"
+            break
+        fi
+    done
+fi
+
+if [ -n "${CUDA_HOME:-}" ]; then
+    echo "  CUDA_HOME: ${CUDA_HOME}"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+else
+    echo "  Warning: CUDA not found, trying to install CUDA toolkit..."
+    # Install CUDA toolkit for compilation
+    sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || true
+    export CUDA_HOME=/usr
+fi
 
 # Install Miniconda if not present
 if [ ! -d "${HOME}/miniconda3" ]; then
@@ -90,20 +120,11 @@ fi
 
 conda activate ${ENV_NAME}
 
-# Install PyTorch with CUDA (required for flash-attn)
-echo "  Installing PyTorch..."
-pip install "torch>=2.2.1,<2.8.0" "torchvision>=0.21.0,<0.23.0" --index-url https://download.pytorch.org/whl/cu121 -q
+# Install PyTorch with CUDA 12.1 (matches flash-attn wheels)
+echo "  Installing PyTorch with CUDA 12.1..."
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121 -q
 
-# Install Flash Attention (required for GR00T)
-echo "  Installing Flash Attention (required for GR00T)..."
-pip install ninja "packaging>=24.2,<26.0" -q
-pip install "flash-attn>=2.5.9,<3.0.0" --no-build-isolation -q 2>&1 || {
-    echo "  Warning: flash-attn installation may have issues"
-    echo "  Trying alternative installation..."
-    pip install flash-attn --no-build-isolation -q || true
-}
-
-# Clone and install LeRobot
+# Clone and install LeRobot FIRST (without groot extras)
 mkdir -p "${WORK_DIR}"
 if [ ! -d "${WORK_DIR}/lerobot" ]; then
     echo "  Cloning LeRobot..."
@@ -112,22 +133,58 @@ fi
 
 cd "${WORK_DIR}/lerobot"
 
-# Install LeRobot with GR00T support
-echo "  Installing LeRobot with GR00T support..."
-pip install -e ".[groot]" -q 2>&1 | grep -v "^ERROR:" || true
+# Install base LeRobot first
+echo "  Installing LeRobot (base)..."
+pip install -e . -q 2>&1 || pip install -e . --no-build-isolation -q
 
-# Install compatible transformers
-pip install "transformers>=4.40.0" -q
+# Install Flash Attention (required for GR00T)
+echo "  Installing Flash Attention (required for GR00T)..."
+pip install ninja packaging -q
+
+# Try pre-built wheel first (much faster), fall back to source build
+echo "  Attempting to install pre-built flash-attn wheel..."
+pip install flash-attn --no-build-isolation -q 2>&1 || {
+    echo "  Pre-built wheel failed, trying source build..."
+    # Ensure CUDA is available for source build
+    if [ -n "${CUDA_HOME:-}" ] && [ -f "${CUDA_HOME}/bin/nvcc" ]; then
+        MAX_JOBS=4 pip install flash-attn --no-build-isolation -q 2>&1 || {
+            echo "  WARNING: Flash Attention installation failed!"
+            echo "  GR00T requires Flash Attention. Trying one more method..."
+            pip install "flash-attn>=2.5.9,<3.0.0" --no-build-isolation 2>&1 || true
+        }
+    else
+        echo "  WARNING: nvcc not found at ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc"
+        echo "  Flash Attention requires CUDA toolkit with nvcc."
+        echo "  Install with: sudo apt-get install nvidia-cuda-toolkit"
+    fi
+}
+
+# Install GR00T-specific dependencies
+echo "  Installing GR00T dependencies..."
+pip install "transformers>=4.40.0" "accelerate>=0.26.0" einops timm -q
 
 # Additional dependencies
-pip install huggingface_hub wandb accelerate -q
+pip install huggingface_hub wandb -q
 
 echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+echo "  CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
 
 # Verify flash attention
-python -c "import flash_attn; print(f'Flash Attention {flash_attn.__version__} ready')" || {
-    echo "  Warning: Flash Attention not working, GR00T may fail"
+python -c "import flash_attn; print(f'  Flash Attention {flash_attn.__version__} ready')" 2>/dev/null || {
+    echo "  WARNING: Flash Attention not working!"
+    echo "  GR00T training will likely fail without Flash Attention."
+    echo ""
+    echo "  To fix manually on Brev:"
+    echo "    1. Ensure CUDA toolkit is installed: sudo apt-get install nvidia-cuda-toolkit"
+    echo "    2. Set CUDA_HOME: export CUDA_HOME=/usr/local/cuda"
+    echo "    3. Reinstall: pip install flash-attn --no-build-isolation"
+    echo ""
+    read -p "  Continue anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
 }
 
 # ---- Step 3: Verify dataset ----
