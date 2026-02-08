@@ -175,6 +175,13 @@ pip install \
     "draccus>=0.10.0" \
     "omegaconf>=2.3.0" \
     "termcolor>=2.4.0" \
+    "pyserial>=3.5" \
+    "diffusers>=0.27.0" \
+    "opencv-python-headless>=4.9.0" \
+    "av>=15.0.0" \
+    "gymnasium>=1.1.0" \
+    "jsonlines>=4.0.0" \
+    "deepdiff>=7.0.1" \
     wandb
 
 # Final verification
