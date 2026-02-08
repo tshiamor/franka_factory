@@ -24,7 +24,7 @@ HF_MODEL_REPO="tshiamor/groot-n15-mcx-card"
 BASE_MODEL="nvidia/GR00T-N1.5-3B"
 WORK_DIR="${HOME}/groot-training"
 OUTPUT_DIR="${WORK_DIR}/outputs"
-BATCH_SIZE=4  # GR00T 3B is large, conservative batch size
+BATCH_SIZE=16  # A100 80GB can handle larger batch size
 STEPS=30000
 SAVE_FREQ=5000
 LOG_FREQ=100
@@ -158,7 +158,7 @@ pip install -e . --no-deps
 # Install LeRobot dependencies manually (excluding torch which we already have)
 echo "  Installing LeRobot dependencies..."
 pip install \
-    "transformers>=4.40.0,<4.50.0" \
+    "transformers>=4.45.0,<5.0.0" \
     "accelerate>=0.26.0" \
     "huggingface_hub>=0.34.0,<1.0.0" \
     "safetensors>=0.4.0" \
@@ -182,6 +182,8 @@ pip install \
     "gymnasium>=1.1.0" \
     "jsonlines>=4.0.0" \
     "deepdiff>=7.0.1" \
+    "peft>=0.10.0" \
+    "dm-tree>=0.1.8" \
     wandb
 
 # Final verification
