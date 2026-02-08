@@ -60,7 +60,7 @@ echo ""
 # ---- Step 1: Install system dependencies + conda ----
 echo "[Step 1/5] Installing system dependencies..."
 sudo apt-get update -qq || echo "  Warning: apt-get update had errors"
-sudo apt-get install -y git git-lfs curl wget ffmpeg libgl1-mesa-glx cmake build-essential libegl1-mesa-dev 2>/dev/null || true
+sudo apt-get install -y git git-lfs curl wget ffmpeg libgl1-mesa-glx cmake build-essential 2>/dev/null || true
 
 # Install git-lfs explicitly
 echo "  Setting up git-lfs..."
@@ -69,29 +69,6 @@ if ! command -v git-lfs &>/dev/null; then
     sudo apt-get install -y git-lfs 2>/dev/null || true
 fi
 git lfs install 2>/dev/null || true
-
-# Set up CUDA environment (required for flash-attn)
-echo "  Detecting CUDA..."
-if [ -z "${CUDA_HOME:-}" ]; then
-    # Common CUDA locations
-    for cuda_path in /usr/local/cuda /usr/local/cuda-12.1 /usr/local/cuda-12.2 /usr/local/cuda-12.3 /usr/local/cuda-12.4 /usr/lib/cuda; do
-        if [ -d "$cuda_path" ]; then
-            export CUDA_HOME="$cuda_path"
-            break
-        fi
-    done
-fi
-
-if [ -n "${CUDA_HOME:-}" ]; then
-    echo "  CUDA_HOME: ${CUDA_HOME}"
-    export PATH="${CUDA_HOME}/bin:${PATH}"
-    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
-else
-    echo "  Warning: CUDA not found, trying to install CUDA toolkit..."
-    # Install CUDA toolkit for compilation
-    sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || true
-    export CUDA_HOME=/usr
-fi
 
 # Install Miniconda if not present
 if [ ! -d "${HOME}/miniconda3" ]; then
@@ -109,18 +86,57 @@ echo "  Conda version: $(conda --version)"
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
 
-# ---- Step 2: Create conda environment ----
-echo "[Step 2/5] Setting up conda environment..."
+# ---- Step 2: Create fresh conda environment with CUDA ----
+echo "[Step 2/5] Setting up conda environment with CUDA toolkit..."
 ENV_NAME="groot"
 
-if ! conda env list | grep -q "^${ENV_NAME} "; then
-    echo "  Creating ${ENV_NAME} environment..."
-    conda create -n ${ENV_NAME} python=3.10 -y --override-channels -c conda-forge
+# Remove old environment if it exists (for clean install)
+if conda env list | grep -q "^${ENV_NAME} "; then
+    echo "  Removing existing ${ENV_NAME} environment for clean install..."
+    conda deactivate 2>/dev/null || true
+    conda env remove -n ${ENV_NAME} -y
 fi
+
+echo "  Creating ${ENV_NAME} environment with Python 3.10 and CUDA toolkit..."
+# Install CUDA toolkit via conda - this ensures nvcc is available and matches
+conda create -n ${ENV_NAME} python=3.10 cuda-toolkit=12.1 -y -c nvidia -c conda-forge
 
 conda activate ${ENV_NAME}
 
-# Clone LeRobot first
+# Verify CUDA toolkit
+echo "  Verifying CUDA toolkit..."
+which nvcc && nvcc --version
+
+# Set CUDA environment
+export CUDA_HOME="${CONDA_PREFIX}"
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+
+echo "  CUDA_HOME: ${CUDA_HOME}"
+
+# ---- Step 3: Install PyTorch and Flash Attention ----
+echo "[Step 3/5] Installing PyTorch and Flash Attention..."
+
+# Install PyTorch with CUDA 12.1 (matching conda cuda-toolkit)
+echo "  Installing PyTorch 2.5.1 with CUDA 12.1..."
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Verify PyTorch
+python -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')"
+
+# Install ninja for faster compilation
+pip install ninja packaging wheel setuptools
+
+# Install Flash Attention (now nvcc is available from conda)
+echo "  Installing Flash Attention..."
+MAX_JOBS=4 pip install flash-attn --no-build-isolation
+
+# Verify Flash Attention
+python -c "import flash_attn; print(f'  Flash Attention {flash_attn.__version__} installed successfully!')"
+
+# ---- Step 4: Install LeRobot and dependencies ----
+echo "[Step 4/5] Installing LeRobot..."
+
 mkdir -p "${WORK_DIR}"
 if [ ! -d "${WORK_DIR}/lerobot" ]; then
     echo "  Cloning LeRobot..."
@@ -129,49 +145,12 @@ fi
 
 cd "${WORK_DIR}/lerobot"
 
-# Install CUDA toolkit if nvcc not available (required for flash-attn)
-echo "  Checking for nvcc (CUDA compiler)..."
-if ! command -v nvcc &>/dev/null; then
-    echo "  nvcc not found, installing CUDA toolkit..."
-    sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || true
-    # Update CUDA paths after installation
-    for cuda_path in /usr/local/cuda /usr/local/cuda-12* /usr/lib/cuda /usr; do
-        if [ -f "$cuda_path/bin/nvcc" ]; then
-            export CUDA_HOME="$cuda_path"
-            export PATH="${CUDA_HOME}/bin:${PATH}"
-            break
-        fi
-    done
-fi
-echo "  CUDA_HOME: ${CUDA_HOME:-not set}"
-nvcc --version 2>/dev/null || echo "  Warning: nvcc still not available"
+# Install LeRobot WITHOUT dependencies (to avoid PyTorch override)
+echo "  Installing LeRobot (without overriding dependencies)..."
+pip install -e . --no-deps
 
-# Install PyTorch FIRST with correct CUDA version
-echo "  Installing PyTorch with CUDA 12.1..."
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
-
-# Verify PyTorch CUDA
-python -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
-
-# Install Flash Attention BEFORE LeRobot (so LeRobot doesn't override PyTorch)
-echo "  Installing Flash Attention (required for GR00T)..."
-pip install ninja packaging
-
-# Try installing flash-attn
-pip install flash-attn --no-build-isolation 2>&1 || {
-    echo "  Source build needed for flash-attn..."
-    if [ -n "${CUDA_HOME:-}" ]; then
-        MAX_JOBS=4 pip install flash-attn --no-build-isolation 2>&1 || {
-            echo "  WARNING: Flash Attention build failed!"
-        }
-    fi
-}
-
-# Install LeRobot WITHOUT letting it override PyTorch
-echo "  Installing LeRobot (preserving PyTorch version)..."
-pip install -e . --no-deps 2>&1 || true
-
-# Install LeRobot dependencies manually (excluding torch)
+# Install LeRobot dependencies manually (excluding torch which we already have)
+echo "  Installing LeRobot dependencies..."
 pip install \
     "transformers>=4.40.0,<4.50.0" \
     "accelerate>=0.26.0" \
@@ -185,47 +164,26 @@ pip install \
     "datasets>=2.19.0" \
     "imageio>=2.34.0" \
     "imageio-ffmpeg>=0.4.9" \
-    wandb \
-    -q
+    "pyyaml>=6.0" \
+    "tqdm>=4.66.0" \
+    "draccus>=0.10.0" \
+    "omegaconf>=2.3.0" \
+    "termcolor>=2.4.0" \
+    wandb
 
-# Re-verify PyTorch version (make sure it wasn't overwritten)
-TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
-echo "  PyTorch version: ${TORCH_VERSION}"
-if [[ ! "$TORCH_VERSION" == 2.5.* ]]; then
-    echo "  WARNING: PyTorch was overwritten! Reinstalling correct version..."
-    pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
-fi
-
+# Final verification
+echo ""
+echo "  ===== Environment Verification ====="
 echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 echo "  CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+echo "  Flash Attention: $(python -c 'import flash_attn; print(flash_attn.__version__)')"
+echo "  LeRobot: $(python -c 'import lerobot; print(lerobot.__version__)')"
+echo "  ====================================="
+echo ""
 
-# Verify flash attention
-python -c "import flash_attn; print(f'  Flash Attention {flash_attn.__version__} ready')" 2>/dev/null || {
-    echo ""
-    echo "  ============================================="
-    echo "  WARNING: Flash Attention not installed!"
-    echo "  ============================================="
-    echo "  GR00T requires Flash Attention to run."
-    echo ""
-    echo "  This usually means nvcc (CUDA compiler) is not available."
-    echo "  The system has CUDA drivers but not the CUDA toolkit."
-    echo ""
-    echo "  To fix on Brev, run these commands manually:"
-    echo "    conda activate groot"
-    echo "    sudo apt-get install -y nvidia-cuda-toolkit"
-    echo "    export CUDA_HOME=/usr/local/cuda"
-    echo "    pip install flash-attn --no-build-isolation"
-    echo ""
-    read -p "  Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-}
-
-# ---- Step 3: Verify dataset ----
-echo "[Step 3/5] Verifying dataset..."
+# ---- Step 5: Verify dataset ----
+echo "[Step 5/5] Verifying dataset and starting training..."
 
 python - <<'PYEOF'
 import os
@@ -237,16 +195,10 @@ api = HfApi()
 try:
     info = api.dataset_info(hf_dataset)
     print(f"Dataset found: {hf_dataset}")
-    print(f"  This is the LeRobot v3.0 format dataset used for Pi-Zero")
-    print(f"  GR00T will use the same dataset format")
+    print(f"  This is the LeRobot v3.0 format dataset")
 except Exception as e:
     print(f"Warning: Could not verify dataset {hf_dataset}: {e}")
 PYEOF
-
-# ---- Step 4: Run GR00T fine-tuning ----
-echo "[Step 4/5] Starting GR00T N1.5-3B fine-tuning..."
-
-cd "${WORK_DIR}/lerobot"
 
 # Clear cache to ensure fresh dataset
 rm -rf ~/.cache/huggingface/lerobot/tshiamor 2>/dev/null || true
@@ -255,8 +207,13 @@ rm -rf ~/.cache/huggingface/lerobot/tshiamor 2>/dev/null || true
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Run training with LeRobot
-# GR00T uses similar interface to Pi-Zero
+# ---- Run GR00T fine-tuning ----
+echo ""
+echo "Starting GR00T N1.5-3B fine-tuning..."
+echo ""
+
+cd "${WORK_DIR}/lerobot"
+
 python -m lerobot.scripts.lerobot_train \
     --policy.type groot \
     --policy.base_model_path "${BASE_MODEL}" \
@@ -275,8 +232,9 @@ python -m lerobot.scripts.lerobot_train \
     --wandb.enable false \
     2>&1 | tee "${WORK_DIR}/training.log"
 
-# ---- Step 5: Upload to HuggingFace ----
-echo "[Step 5/5] Uploading trained model to HuggingFace..."
+# ---- Upload to HuggingFace ----
+echo ""
+echo "Uploading trained model to HuggingFace..."
 
 export OUTPUT_DIR HF_MODEL_REPO
 python - <<'UPLOADEOF'
