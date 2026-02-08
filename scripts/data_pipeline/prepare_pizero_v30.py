@@ -211,9 +211,9 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     ep_df = pd.DataFrame(episode_data)
     ep_df.to_parquet(episodes_dir / "file-000.parquet", index=False)
 
-    # Save tasks
-    tasks_df = pd.DataFrame([{"task_index": 0, "task": TASK_INSTRUCTION}])
-    tasks_df.to_parquet(meta_dir / "tasks.parquet", index=False)
+    # Save tasks (LeRobot expects task string as the index, task_index as the column)
+    tasks_df = pd.DataFrame({"task_index": [0]}, index=[TASK_INSTRUCTION])
+    tasks_df.to_parquet(meta_dir / "tasks.parquet")
 
     # Build features schema (must include ALL columns in parquet)
     features = {

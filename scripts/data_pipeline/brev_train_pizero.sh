@@ -26,7 +26,7 @@ WORK_DIR="${HOME}/pizero-training"
 DATASET_DIR="${WORK_DIR}/dataset"
 OUTPUT_DIR="${WORK_DIR}/outputs"
 NUM_EPOCHS=100
-BATCH_SIZE=64  # Optimized for H100 81GB VRAM
+BATCH_SIZE=8  # Conservative for Pi-Zero (3.5B params) on A100 40GB
 LEARNING_RATE="1e-4"
 NUM_GPUS=4
 
@@ -113,6 +113,9 @@ pip install -e ".[all]" -q 2>&1 | grep -v "^ERROR:" || true
 # Additional dependencies
 pip install huggingface_hub wandb imageio[ffmpeg] -q
 
+# Install compatible transformers version for Pi-Zero
+pip install "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi" -q
+
 echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 
@@ -164,9 +167,21 @@ python -c "import lerobot; print(f'LeRobot version: {lerobot.__version__}')" || 
 rm -rf ~/.cache/huggingface/lerobot/tshiamor 2>/dev/null || true
 rm -rf ~/.cache/huggingface/hub/datasets--tshiamor--mcx-card-pizero 2>/dev/null || true
 
-# Run training with LeRobot (single line command for reliability)
-# Uses ACT policy (Action Chunking Transformer) for Pi-Zero style training
-python -m lerobot.scripts.lerobot_train --policy.type act --dataset.repo_id "${HF_DATASET}" --dataset.revision main --output_dir "${OUTPUT_DIR}" --batch_size ${BATCH_SIZE} --steps 100000 --save_freq 25000 --log_freq 100 --policy.chunk_size ${CHUNK_SIZE} --policy.n_action_steps ${ACTION_HORIZON} --policy.repo_id "${HF_MODEL_REPO}" --wandb.enable false 2>&1 | tee "${WORK_DIR}/training.log"
+# Run training with LeRobot Pi-Zero (fine-tuning pre-trained VLA model)
+python -m lerobot.scripts.lerobot_train \
+    --policy.type pi0 \
+    --policy.pretrained_path lerobot/pi0_base \
+    --dataset.repo_id "${HF_DATASET}" \
+    --dataset.revision main \
+    --output_dir "${OUTPUT_DIR}" \
+    --batch_size ${BATCH_SIZE} \
+    --steps 30000 \
+    --save_freq 5000 \
+    --log_freq 100 \
+    --policy.chunk_size ${CHUNK_SIZE} \
+    --policy.n_action_steps ${ACTION_HORIZON} \
+    --wandb.enable false \
+    2>&1 | tee "${WORK_DIR}/training.log"
 
 # ---- Step 6: Upload to HuggingFace ----
 echo "[Step 6/6] Uploading trained model to HuggingFace..."
