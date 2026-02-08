@@ -16,7 +16,7 @@
 #
 # =============================================================================
 
-set -euo pipefail
+set -eo pipefail
 
 # ---- Configuration ----
 HF_DATASET="tshiamor/mcx-card-pizero"  # LeRobot v3.0 format dataset
@@ -100,6 +100,12 @@ fi
 echo "  Creating ${ENV_NAME} environment with Python 3.10 and CUDA toolkit..."
 # Install CUDA toolkit via conda - this ensures nvcc is available and matches
 conda create -n ${ENV_NAME} python=3.10 cuda-toolkit=12.1 -y -c nvidia -c conda-forge
+
+# Re-initialize conda (needed after env creation on some systems)
+eval "$(${HOME}/miniconda3/bin/conda shell.bash hook)"
+
+# Set NVCC_PREPEND_FLAGS to avoid unbound variable error in CUDA activation script
+export NVCC_PREPEND_FLAGS=""
 
 conda activate ${ENV_NAME}
 
