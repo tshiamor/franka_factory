@@ -378,10 +378,13 @@ def main():
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
 
+            # Convert pixel_values to bfloat16 to match model dtype
+            pixel_values = batch.get("pixel_values").to(torch.bfloat16)
+
             outputs = model(
                 input_ids=batch.get("input_ids"),
                 attention_mask=batch.get("attention_mask"),
-                pixel_values=batch.get("pixel_values"),
+                pixel_values=pixel_values,
                 labels=batch.get("labels"),
             )
 
