@@ -31,8 +31,8 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
-TASK_INSTRUCTION = "Pick up the card and place it on the target."
-CODEBASE_VERSION = "3.0"
+TASK_INSTRUCTION = "pick up the blue block and place it in the first card's closest slot"
+CODEBASE_VERSION = "v3.0"
 FPS = 30
 IMAGE_SIZE = 224
 
