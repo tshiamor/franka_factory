@@ -118,10 +118,10 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
 
             num_steps = len(images)
 
-            # Save video
+            # Save video (using file-XXX.mp4 format like reference datasets)
             try:
                 import imageio
-                video_path = videos_dir / f"episode_{ep_idx:06d}.mp4"
+                video_path = videos_dir / f"file-{ep_idx:03d}.mp4"
                 writer = imageio.get_writer(str(video_path), fps=fps, codec='libx264', quality=8)
                 for img in images:
                     writer.append_data(img)
@@ -154,11 +154,21 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
                 all_frames.append(frame)
                 total_frames += 1
 
-            # Episode metadata
+            # Episode metadata with full LeRobot v3.0 format
             episode_data.append({
                 "episode_index": np.int64(ep_idx),
-                "tasks": json.dumps([TASK_INSTRUCTION]),
+                "data/chunk_index": np.int64(0),
+                "data/file_index": np.int64(0),
+                "dataset_from_index": np.int64(total_frames - num_steps),
+                "dataset_to_index": np.int64(total_frames),
+                f"videos/observation.images.{camera}/chunk_index": np.int64(0),
+                f"videos/observation.images.{camera}/file_index": np.int64(ep_idx),
+                f"videos/observation.images.{camera}/from_timestamp": 0.0,
+                f"videos/observation.images.{camera}/to_timestamp": float(num_steps / fps),
+                "tasks": [TASK_INSTRUCTION],
                 "length": np.int64(num_steps),
+                "meta/episodes/chunk_index": np.int64(0),
+                "meta/episodes/file_index": np.int64(0),
             })
 
     # Create PyArrow schema for nested list columns
@@ -281,7 +291,7 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
         "total_chunks": 1,
         "chunks_size": 1000,
         "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
-        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/episode_{episode_index:06d}.mp4",
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
         "features": features,
         "splits": {"train": f"0:{num_episodes}"},
     }
