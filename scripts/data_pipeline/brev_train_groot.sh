@@ -186,6 +186,9 @@ class GROOTConfig:
     action_horizon = 16
     observation_horizon = 2
 
+    # State (eef_pos=3 + eef_quat=4 + joint_pos=9 + gripper_pos=2 = 18)
+    state_dim = 18
+
     # Diffusion
     num_diffusion_steps = 100
     beta_start = 0.0001
@@ -321,9 +324,9 @@ class SimpleDiffusionPolicy(nn.Module):
             nn.Linear(256, config.hidden_size),
         )
 
-        # State encoder
+        # State encoder (state_dim from config)
         self.state_encoder = nn.Sequential(
-            nn.Linear(9, 256),
+            nn.Linear(config.state_dim, 256),
             nn.ReLU(),
             nn.Linear(256, config.hidden_size),
         )
