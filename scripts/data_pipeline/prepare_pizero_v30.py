@@ -164,10 +164,10 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
     # Create PyArrow schema for nested list columns
     print(f"Saving {len(all_frames)} frames with nested list columns...")
 
-    # Build the schema (use variable-length lists like LeRobot reference datasets)
+    # Build the schema (use FIXED-SIZE lists as required by LeRobot)
     schema_fields = [
-        pa.field("observation.state", pa.list_(pa.float32())),
-        pa.field("action", pa.list_(pa.float32())),
+        pa.field("observation.state", pa.list_(pa.float32(), list_size=state_dim)),
+        pa.field("action", pa.list_(pa.float32(), list_size=action_dim)),
         pa.field("episode_index", pa.int64()),
         pa.field("frame_index", pa.int64()),
         pa.field("timestamp", pa.float32()),
@@ -178,13 +178,13 @@ def create_lerobot_v30_dataset(hdf5_path: str, output_dir: str, camera: str = "w
 
     schema = pa.schema(schema_fields)
 
-    # Convert to PyArrow table (use variable-length lists)
+    # Convert to PyArrow table (use FIXED-SIZE lists)
     action_data = [f.get("action", [0.0] * action_dim) for f in all_frames]
     state_data = [f.get("observation.state", [0.0] * state_dim) for f in all_frames]
 
     arrays = {
-        "observation.state": pa.array(state_data, type=pa.list_(pa.float32())),
-        "action": pa.array(action_data, type=pa.list_(pa.float32())),
+        "observation.state": pa.FixedSizeListArray.from_arrays(pa.array([x for row in state_data for x in row], type=pa.float32()), list_size=state_dim),
+        "action": pa.FixedSizeListArray.from_arrays(pa.array([x for row in action_data for x in row], type=pa.float32()), list_size=action_dim),
         "episode_index": pa.array([f["episode_index"] for f in all_frames], type=pa.int64()),
         "frame_index": pa.array([f["frame_index"] for f in all_frames], type=pa.int64()),
         "timestamp": pa.array([f["timestamp"] for f in all_frames], type=pa.float32()),
