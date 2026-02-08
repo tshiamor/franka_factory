@@ -23,8 +23,9 @@ HF_MODEL_REPO="tshiamor/openvla-mcx-card"
 BASE_MODEL="openvla/openvla-7b"
 WORK_DIR="${HOME}/openvla-training"
 OUTPUT_DIR="${WORK_DIR}/checkpoints"
+DATASET_DIR="${WORK_DIR}/dataset"
 NUM_EPOCHS=10
-BATCH_SIZE=4  # OpenVLA 7B is large, conservative for A100 40GB
+BATCH_SIZE=8  # A100 80GB can handle batch size 8
 LEARNING_RATE="2e-5"
 
 echo "============================================="
@@ -142,22 +143,18 @@ echo "[Step 4/5] Installing OpenVLA and dependencies..."
 
 mkdir -p "${WORK_DIR}"
 
-# Clone OpenVLA
+# Clone OpenVLA (for reference, but we won't use their training script)
 if [ ! -d "${WORK_DIR}/openvla" ]; then
     echo "  Cloning OpenVLA..."
     git clone https://github.com/openvla/openvla.git "${WORK_DIR}/openvla"
 fi
 
-cd "${WORK_DIR}/openvla"
-
-# Install OpenVLA without overriding PyTorch
-pip install -e . --no-deps
-
-# Install dependencies manually
+# Install dependencies (OpenVLA-compatible versions)
 pip install \
-    "transformers>=4.40.0,<5.0.0" \
+    "transformers>=4.40.0,<4.50.0" \
     "accelerate>=0.26.0" \
     "huggingface_hub>=0.20.0" \
+    "hf_transfer>=0.1.6" \
     "safetensors>=0.4.0" \
     "datasets>=2.19.0" \
     "bitsandbytes>=0.42.0" \
@@ -166,6 +163,7 @@ pip install \
     "numpy>=1.24.0,<2.0.0" \
     "tqdm>=4.66.0" \
     "peft>=0.10.0" \
+    "timm>=0.9.10,<1.0.0" \
     wandb
 
 # Final verification
@@ -175,43 +173,32 @@ echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 echo "  CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
 echo "  Flash Attention: $(python -c 'import flash_attn; print(flash_attn.__version__)')"
+echo "  timm: $(python -c 'import timm; print(timm.__version__)')"
 echo "  ====================================="
 echo ""
 
-# ---- Step 5: Verify dataset and run training ----
-echo "[Step 5/5] Verifying dataset and starting training..."
-
-python - <<'PYEOF'
-import os
-from huggingface_hub import HfApi
-
-hf_dataset = os.environ.get("HF_DATASET", "tshiamor/mcx-card-openvla")
-api = HfApi()
-
-try:
-    info = api.dataset_info(hf_dataset)
-    print(f"Dataset found: {hf_dataset}")
-except Exception as e:
-    print(f"Warning: Could not verify dataset {hf_dataset}: {e}")
-PYEOF
+# ---- Step 5: Download dataset and run training ----
+echo "[Step 5/5] Downloading dataset and starting training..."
 
 # Set environment
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Create training script
-cat > "${WORK_DIR}/train_openvla_hf.py" << 'TRAINEOF'
+cat > "${WORK_DIR}/train_openvla.py" << 'TRAINEOF'
 #!/usr/bin/env python3
 """
-Fine-tune OpenVLA on MCX Card manipulation dataset (HuggingFace RLDS format).
+Fine-tune OpenVLA on MCX Card manipulation dataset (numpy file format).
 """
 
 import os
 import torch
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-from PIL import Image
+import json
 import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from pathlib import Path
+from huggingface_hub import snapshot_download
 from transformers import (
     AutoModelForVision2Seq,
     AutoProcessor,
@@ -219,15 +206,100 @@ from transformers import (
 )
 from tqdm import tqdm
 import wandb
-from pathlib import Path
+
+
+class OpenVLANumpyDataset(Dataset):
+    """Dataset loader for OpenVLA numpy file format."""
+
+    def __init__(self, data_dir, processor):
+        self.data_dir = Path(data_dir)
+        self.processor = processor
+
+        # Find all episode directories
+        self.episodes = sorted([
+            d for d in self.data_dir.iterdir()
+            if d.is_dir() and d.name.startswith("episode_")
+        ])
+        print(f"Found {len(self.episodes)} episodes in {data_dir}")
+
+        # Build sample index (episode_idx, step_idx)
+        self.samples = []
+        for ep_idx, ep_dir in enumerate(self.episodes):
+            images_path = ep_dir / "images.npy"
+            if images_path.exists():
+                images = np.load(images_path, mmap_mode='r')
+                num_steps = len(images)
+                for t in range(num_steps):
+                    self.samples.append((ep_idx, t))
+
+        print(f"Total samples: {len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        ep_idx, t = self.samples[idx]
+        ep_dir = self.episodes[ep_idx]
+
+        # Load image
+        images = np.load(ep_dir / "images.npy", mmap_mode='r')
+        image = images[t]  # (H, W, 3) uint8
+
+        # Load action
+        actions_path = ep_dir / "actions.npy"
+        if actions_path.exists():
+            actions = np.load(actions_path)
+            action = actions[t] if t < len(actions) else np.zeros(7, dtype=np.float32)
+        else:
+            action = np.zeros(7, dtype=np.float32)
+
+        # Load language instruction
+        metadata_path = ep_dir / "metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            instruction = meta.get("language_instruction",
+                "Pick up the blue block and place it on the target")
+        else:
+            instruction = "Pick up the blue block and place it on the target"
+
+        # Convert to PIL
+        pil_image = Image.fromarray(image)
+
+        return {
+            "image": pil_image,
+            "instruction": instruction,
+            "action": torch.tensor(action, dtype=torch.float32),
+        }
+
+
+def collate_fn(batch, processor):
+    """Collate batch for OpenVLA."""
+    images = [item["image"] for item in batch]
+    instructions = [item["instruction"] for item in batch]
+    actions = torch.stack([item["action"] for item in batch])
+
+    inputs = processor(
+        images=images,
+        text=instructions,
+        return_tensors="pt",
+        padding=True,
+    )
+
+    inputs["labels"] = inputs["input_ids"].clone()
+    inputs["actions"] = actions
+
+    return inputs
+
 
 def main():
-    # Configuration from environment
+    # Configuration
     hf_dataset = os.environ.get("HF_DATASET", "tshiamor/mcx-card-openvla")
     output_dir = Path(os.environ.get("OUTPUT_DIR", "~/openvla-training/checkpoints")).expanduser()
+    dataset_dir = Path(os.environ.get("DATASET_DIR", "~/openvla-training/dataset")).expanduser()
     base_model = os.environ.get("BASE_MODEL", "openvla/openvla-7b")
     num_epochs = int(os.environ.get("NUM_EPOCHS", "10"))
-    batch_size = int(os.environ.get("BATCH_SIZE", "4"))
+    batch_size = int(os.environ.get("BATCH_SIZE", "8"))
     learning_rate = float(os.environ.get("LEARNING_RATE", "2e-5"))
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +313,15 @@ def main():
     if os.environ.get("WANDB_MODE") != "offline":
         wandb.init(project="openvla-mcx-card", name="finetune")
 
+    # Download dataset
+    print(f"Downloading dataset {hf_dataset}...")
+    snapshot_download(
+        repo_id=hf_dataset,
+        repo_type="dataset",
+        local_dir=dataset_dir,
+    )
+    print(f"Dataset downloaded to {dataset_dir}")
+
     # Load model and processor
     print("Loading OpenVLA model...")
     processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
@@ -249,104 +330,28 @@ def main():
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
+        attn_implementation="eager",
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    # Enable gradient checkpointing to save memory
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
 
-    # Load dataset from HuggingFace
-    print(f"Loading dataset {hf_dataset}...")
-    dataset = load_dataset(hf_dataset, split="train")
-    print(f"Dataset loaded: {len(dataset)} samples")
-    print(f"Columns: {dataset.column_names}")
+    # Load dataset
+    print("Loading dataset from numpy files...")
+    train_dataset = OpenVLANumpyDataset(dataset_dir / "train", processor)
 
-    # Dataset processing function
-    def process_sample(sample):
-        """Process a single sample for OpenVLA training."""
-        # Get instruction
-        instruction = sample.get("language_instruction", "Pick up the blue block and place it on the target")
+    if len(train_dataset) == 0:
+        raise ValueError(f"No samples found in {dataset_dir / 'train'}. Check dataset structure.")
 
-        # Get image (handle different formats)
-        if "observation.image" in sample:
-            img_data = sample["observation.image"]
-        elif "image" in sample:
-            img_data = sample["image"]
-        else:
-            # Find any image column
-            for col in sample.keys():
-                if "image" in col.lower():
-                    img_data = sample[col]
-                    break
-            else:
-                raise ValueError(f"No image column found in {sample.keys()}")
-
-        # Convert to PIL Image if needed
-        if isinstance(img_data, dict) and "bytes" in img_data:
-            import io
-            pil_image = Image.open(io.BytesIO(img_data["bytes"]))
-        elif isinstance(img_data, np.ndarray):
-            pil_image = Image.fromarray(img_data.astype(np.uint8))
-        elif isinstance(img_data, Image.Image):
-            pil_image = img_data
-        else:
-            pil_image = img_data  # Assume it's already a PIL Image
-
-        # Get action
-        if "action" in sample:
-            action = sample["action"]
-        else:
-            action = np.zeros(7, dtype=np.float32)
-
-        return {
-            "image": pil_image,
-            "instruction": instruction,
-            "action": torch.tensor(action, dtype=torch.float32) if not isinstance(action, torch.Tensor) else action,
-        }
-
-    def collate_fn(batch):
-        """Collate batch for OpenVLA."""
-        images = [item["image"] for item in batch]
-        instructions = [item["instruction"] for item in batch]
-        actions = torch.stack([item["action"] for item in batch])
-
-        # Process with OpenVLA processor
-        inputs = processor(
-            images=images,
-            text=instructions,
-            return_tensors="pt",
-            padding=True,
-        )
-
-        inputs["labels"] = inputs["input_ids"].clone()
-        inputs["actions"] = actions
-
-        return inputs
-
-    # Create processed dataset
-    print("Processing dataset...")
-    processed_samples = []
-    for i, sample in enumerate(tqdm(dataset, desc="Processing")):
-        try:
-            processed = process_sample(sample)
-            processed_samples.append(processed)
-        except Exception as e:
-            if i < 5:
-                print(f"Warning: Failed to process sample {i}: {e}")
-            continue
-
-    print(f"Processed {len(processed_samples)} samples successfully")
-
-    # Create DataLoader
     train_loader = DataLoader(
-        processed_samples,
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=4,
-        collate_fn=collate_fn,
+        collate_fn=lambda b: collate_fn(b, processor),
         pin_memory=True,
     )
 
@@ -361,7 +366,7 @@ def main():
     )
 
     # Training loop
-    print("Starting training...")
+    print(f"Starting training: {len(train_dataset)} samples, {len(train_loader)} batches/epoch")
     global_step = 0
 
     for epoch in range(num_epochs):
@@ -370,11 +375,9 @@ def main():
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
         for batch in pbar:
-            # Move to device
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
 
-            # Forward pass
             outputs = model(
                 input_ids=batch.get("input_ids"),
                 attention_mask=batch.get("attention_mask"),
@@ -384,7 +387,6 @@ def main():
 
             loss = outputs.loss
 
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -406,7 +408,6 @@ def main():
         avg_train_loss = epoch_loss / len(train_loader)
         print(f"Epoch {epoch+1}: avg_train_loss={avg_train_loss:.4f}")
 
-        # Save checkpoint every 2 epochs
         if (epoch + 1) % 2 == 0:
             ckpt_dir = output_dir / f"checkpoint-epoch-{epoch+1}"
             model.save_pretrained(ckpt_dir)
@@ -423,6 +424,7 @@ def main():
     if os.environ.get("WANDB_MODE") != "offline":
         wandb.finish()
 
+
 if __name__ == "__main__":
     main()
 TRAINEOF
@@ -432,9 +434,9 @@ echo ""
 echo "Starting OpenVLA fine-tuning..."
 echo ""
 
-export HF_DATASET OUTPUT_DIR BASE_MODEL NUM_EPOCHS BATCH_SIZE LEARNING_RATE
+export HF_DATASET OUTPUT_DIR DATASET_DIR BASE_MODEL NUM_EPOCHS BATCH_SIZE LEARNING_RATE
 
-python "${WORK_DIR}/train_openvla_hf.py" 2>&1 | tee "${WORK_DIR}/training.log"
+python "${WORK_DIR}/train_openvla.py" 2>&1 | tee "${WORK_DIR}/training.log"
 
 # ---- Upload to HuggingFace ----
 echo ""
