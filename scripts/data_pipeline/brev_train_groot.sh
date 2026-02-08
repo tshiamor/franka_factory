@@ -120,11 +120,7 @@ fi
 
 conda activate ${ENV_NAME}
 
-# Install PyTorch with CUDA 12.1 (matches flash-attn wheels)
-echo "  Installing PyTorch with CUDA 12.1..."
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121 -q
-
-# Clone and install LeRobot FIRST (without groot extras)
+# Clone LeRobot first
 mkdir -p "${WORK_DIR}"
 if [ ! -d "${WORK_DIR}/lerobot" ]; then
     echo "  Cloning LeRobot..."
@@ -133,38 +129,72 @@ fi
 
 cd "${WORK_DIR}/lerobot"
 
-# Install base LeRobot first
-echo "  Installing LeRobot (base)..."
-pip install -e . -q 2>&1 || pip install -e . --no-build-isolation -q
+# Install CUDA toolkit if nvcc not available (required for flash-attn)
+echo "  Checking for nvcc (CUDA compiler)..."
+if ! command -v nvcc &>/dev/null; then
+    echo "  nvcc not found, installing CUDA toolkit..."
+    sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || true
+    # Update CUDA paths after installation
+    for cuda_path in /usr/local/cuda /usr/local/cuda-12* /usr/lib/cuda /usr; do
+        if [ -f "$cuda_path/bin/nvcc" ]; then
+            export CUDA_HOME="$cuda_path"
+            export PATH="${CUDA_HOME}/bin:${PATH}"
+            break
+        fi
+    done
+fi
+echo "  CUDA_HOME: ${CUDA_HOME:-not set}"
+nvcc --version 2>/dev/null || echo "  Warning: nvcc still not available"
 
-# Install Flash Attention (required for GR00T)
+# Install PyTorch FIRST with correct CUDA version
+echo "  Installing PyTorch with CUDA 12.1..."
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Verify PyTorch CUDA
+python -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+
+# Install Flash Attention BEFORE LeRobot (so LeRobot doesn't override PyTorch)
 echo "  Installing Flash Attention (required for GR00T)..."
-pip install ninja packaging -q
+pip install ninja packaging
 
-# Try pre-built wheel first (much faster), fall back to source build
-echo "  Attempting to install pre-built flash-attn wheel..."
-pip install flash-attn --no-build-isolation -q 2>&1 || {
-    echo "  Pre-built wheel failed, trying source build..."
-    # Ensure CUDA is available for source build
-    if [ -n "${CUDA_HOME:-}" ] && [ -f "${CUDA_HOME}/bin/nvcc" ]; then
-        MAX_JOBS=4 pip install flash-attn --no-build-isolation -q 2>&1 || {
-            echo "  WARNING: Flash Attention installation failed!"
-            echo "  GR00T requires Flash Attention. Trying one more method..."
-            pip install "flash-attn>=2.5.9,<3.0.0" --no-build-isolation 2>&1 || true
+# Try installing flash-attn
+pip install flash-attn --no-build-isolation 2>&1 || {
+    echo "  Source build needed for flash-attn..."
+    if [ -n "${CUDA_HOME:-}" ]; then
+        MAX_JOBS=4 pip install flash-attn --no-build-isolation 2>&1 || {
+            echo "  WARNING: Flash Attention build failed!"
         }
-    else
-        echo "  WARNING: nvcc not found at ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc"
-        echo "  Flash Attention requires CUDA toolkit with nvcc."
-        echo "  Install with: sudo apt-get install nvidia-cuda-toolkit"
     fi
 }
 
-# Install GR00T-specific dependencies
-echo "  Installing GR00T dependencies..."
-pip install "transformers>=4.40.0" "accelerate>=0.26.0" einops timm -q
+# Install LeRobot WITHOUT letting it override PyTorch
+echo "  Installing LeRobot (preserving PyTorch version)..."
+pip install -e . --no-deps 2>&1 || true
 
-# Additional dependencies
-pip install huggingface_hub wandb -q
+# Install LeRobot dependencies manually (excluding torch)
+pip install \
+    "transformers>=4.40.0,<4.50.0" \
+    "accelerate>=0.26.0" \
+    "huggingface_hub>=0.34.0,<1.0.0" \
+    "safetensors>=0.4.0" \
+    "einops>=0.8.0" \
+    "timm>=1.0.0" \
+    "pillow>=10.0.0" \
+    "numpy>=1.24.0,<2.0.0" \
+    "pyarrow>=15.0.0" \
+    "datasets>=2.19.0" \
+    "imageio>=2.34.0" \
+    "imageio-ffmpeg>=0.4.9" \
+    wandb \
+    -q
+
+# Re-verify PyTorch version (make sure it wasn't overwritten)
+TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
+echo "  PyTorch version: ${TORCH_VERSION}"
+if [[ ! "$TORCH_VERSION" == 2.5.* ]]; then
+    echo "  WARNING: PyTorch was overwritten! Reinstalling correct version..."
+    pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
+fi
 
 echo "  Python: $(python --version)"
 echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)')"
@@ -172,13 +202,20 @@ echo "  CUDA available: $(python -c 'import torch; print(torch.cuda.is_available
 
 # Verify flash attention
 python -c "import flash_attn; print(f'  Flash Attention {flash_attn.__version__} ready')" 2>/dev/null || {
-    echo "  WARNING: Flash Attention not working!"
-    echo "  GR00T training will likely fail without Flash Attention."
     echo ""
-    echo "  To fix manually on Brev:"
-    echo "    1. Ensure CUDA toolkit is installed: sudo apt-get install nvidia-cuda-toolkit"
-    echo "    2. Set CUDA_HOME: export CUDA_HOME=/usr/local/cuda"
-    echo "    3. Reinstall: pip install flash-attn --no-build-isolation"
+    echo "  ============================================="
+    echo "  WARNING: Flash Attention not installed!"
+    echo "  ============================================="
+    echo "  GR00T requires Flash Attention to run."
+    echo ""
+    echo "  This usually means nvcc (CUDA compiler) is not available."
+    echo "  The system has CUDA drivers but not the CUDA toolkit."
+    echo ""
+    echo "  To fix on Brev, run these commands manually:"
+    echo "    conda activate groot"
+    echo "    sudo apt-get install -y nvidia-cuda-toolkit"
+    echo "    export CUDA_HOME=/usr/local/cuda"
+    echo "    pip install flash-attn --no-build-isolation"
     echo ""
     read -p "  Continue anyway? (y/N) " -n 1 -r
     echo
