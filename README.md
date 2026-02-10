@@ -406,6 +406,9 @@ pip install -e ~/lerobot
 # For Pi-Zero: Install special transformers fork
 pip install "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
 
+# For OpenVLA: Install timm (compatible version)
+pip install "timm>=0.9.10,<1.0.0"
+
 # For Flash Attention (recommended for speed)
 pip install flash-attn --no-build-isolation
 
@@ -518,6 +521,12 @@ Fix: `pip install "numpy<2"`
 ImportError: FlashAttention2 has been toggled on, but it cannot be used
 ```
 Fix: `pip install flash-attn --no-build-isolation`
+
+**TIMM version error (OpenVLA):**
+```
+NotImplementedError: TIMM Version must be >= 0.9.10 and < 1.0.0
+```
+Fix: `pip install "timm>=0.9.10,<1.0.0"`
 
 **Transformers version error (Pi-Zero):**
 ```
