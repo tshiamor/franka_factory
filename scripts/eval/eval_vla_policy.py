@@ -103,6 +103,17 @@ class VLAPolicyWrapper:
             self.policy.to(self.device)
             self.policy.eval()
 
+            # Select unnorm_key for action denormalization
+            # If only one dataset in norm_stats, use it; otherwise use bridge_orig as default
+            norm_stats = self.policy.norm_stats
+            if len(norm_stats) == 1:
+                self.unnorm_key = next(iter(norm_stats.keys()))
+            elif "bridge_orig" in norm_stats:
+                self.unnorm_key = "bridge_orig"
+            else:
+                self.unnorm_key = next(iter(norm_stats.keys()))
+            print(f"  Using unnorm_key: {self.unnorm_key}")
+
         print(f"Policy loaded successfully!")
 
     def get_action(self, obs: dict, task_instruction: str = None) -> torch.Tensor:
@@ -185,46 +196,40 @@ class VLAPolicyWrapper:
         return action.squeeze(0)
 
     def _get_action_openvla(self, obs: dict, task_instruction: str) -> torch.Tensor:
-        """Get action from OpenVLA policy."""
+        """Get action from OpenVLA policy.
+
+        Uses the model's predict_action() method which properly handles:
+        1. Action token generation
+        2. Token-to-bin decoding (vocab_size - token_id)
+        3. Bin-to-continuous mapping via bin_centers
+        4. Unnormalization using dataset norm_stats
+        """
         # Convert to PIL Image
         image = Image.fromarray(obs["wrist_rgb"].astype(np.uint8))
 
-        # Process inputs
+        # Format prompt for OpenVLA: "In: What action should the robot take to {instruction}?\nOut:"
+        prompt = f"In: What action should the robot take to {task_instruction}?\nOut:"
+
+        # Process inputs to get input_ids
         inputs = self.processor(
             images=image,
-            text=task_instruction,
+            text=prompt,
             return_tensors="pt",
         ).to(self.device)
 
         inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
 
         with torch.no_grad():
-            # Generate action tokens
-            generated_ids = self.policy.generate(
-                **inputs,
-                max_new_tokens=256,
+            # Use predict_action which handles action token decoding and unnormalization
+            action = self.policy.predict_action(
+                input_ids=inputs["input_ids"],
+                unnorm_key=self.unnorm_key,
+                pixel_values=inputs["pixel_values"],
+                attention_mask=inputs["attention_mask"],
                 do_sample=False,
             )
 
-            # Decode action
-            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            action = self._parse_openvla_action(generated_text)
-
         return torch.from_numpy(action).float().to(self.device)
-
-    def _parse_openvla_action(self, text: str, action_dim: int = 7) -> np.ndarray:
-        """Parse action from OpenVLA generated text."""
-        import re
-        try:
-            numbers = re.findall(r"[-+]?\d*\.?\d+", text)
-            if len(numbers) >= action_dim:
-                return np.array([float(n) for n in numbers[:action_dim]], dtype=np.float32)
-            else:
-                print(f"Warning: Could not parse action from: {text[:100]}")
-                return np.zeros(action_dim, dtype=np.float32)
-        except Exception as e:
-            print(f"Error parsing action: {e}")
-            return np.zeros(action_dim, dtype=np.float32)
 
 
 def prepare_observation(env_obs: dict, device: str = "cuda") -> dict:
