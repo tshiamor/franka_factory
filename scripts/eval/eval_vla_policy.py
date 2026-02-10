@@ -12,16 +12,16 @@ Supports:
 
 Usage:
     # Pi-Zero
-    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Direct-v0 \
-        --policy pizero --model tshiamor/pizero-mcx-card
+    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+        --policy pizero --model tshiamor/pizero-mcx-card --enable_cameras
 
     # GR00T
-    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Direct-v0 \
-        --policy groot --model tshiamor/groot-n15-mcx-card
+    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+        --policy groot --model tshiamor/groot-n15-mcx-card --enable_cameras
 
     # OpenVLA
-    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Direct-v0 \
-        --policy openvla --model tshiamor/openvla-mcx-card
+    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+        --policy openvla --model tshiamor/openvla-mcx-card --enable_cameras
 """
 
 import argparse
@@ -73,16 +73,22 @@ class VLAPolicyWrapper:
         print(f"Loading {self.policy_type} policy from {self.model_id}...")
 
         if self.policy_type == "pizero":
-            from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
+            from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+            from transformers import AutoTokenizer
             self.policy = PI0Policy.from_pretrained(self.model_id)
             self.policy.to(self.device)
             self.policy.eval()
+            # Load tokenizer for language
+            self.tokenizer = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
 
         elif self.policy_type == "groot":
-            from lerobot.common.policies.groot.modeling_groot import GR00TPolicy
-            self.policy = GR00TPolicy.from_pretrained(self.model_id)
+            from lerobot.policies.groot.modeling_groot import GrootPolicy
+            from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors
+            self.policy = GrootPolicy.from_pretrained(self.model_id)
             self.policy.to(self.device)
             self.policy.eval()
+            # Create preprocessor for GR00T
+            self.preprocessor, self.postprocessor = make_groot_pre_post_processors(self.policy.config)
 
         elif self.policy_type == "openvla":
             from transformers import AutoModelForVision2Seq, AutoProcessor
@@ -110,22 +116,39 @@ class VLAPolicyWrapper:
             action: Tensor of shape (7,) - 6D pose + 1D gripper
         """
         if self.policy_type == "pizero":
-            return self._get_action_pizero(obs)
+            return self._get_action_pizero(obs, task_instruction)
         elif self.policy_type == "groot":
             return self._get_action_groot(obs, task_instruction)
         elif self.policy_type == "openvla":
             return self._get_action_openvla(obs, task_instruction)
 
-    def _get_action_pizero(self, obs: dict) -> torch.Tensor:
+    def _get_action_pizero(self, obs: dict, task_instruction: str) -> torch.Tensor:
         """Get action from Pi-Zero policy."""
-        # Prepare observation for LeRobot format
+        # Prepare image: normalize to [-1, 1] as expected by PaliGemma
+        # Image should be (B, C, H, W) with values in [-1, 1]
+        wrist_rgb = obs["wrist_rgb"].astype(np.float32) / 255.0  # [0, 1]
+        wrist_rgb = (wrist_rgb * 2) - 1  # [-1, 1]
+        wrist_tensor = torch.from_numpy(wrist_rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+
+        # Prepare state
+        state_tensor = torch.from_numpy(obs["state"]).unsqueeze(0).float().to(self.device)
+
+        # Tokenize language instruction (add newline as required by PaliGemma)
+        task = task_instruction if task_instruction.endswith("\n") else f"{task_instruction}\n"
+        tokenized = self.tokenizer(
+            task,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.policy.config.tokenizer_max_length,
+            truncation=True,
+        )
+
+        # Prepare observation in the format expected by Pi-Zero
         lerobot_obs = {
-            "observation.images.wrist_rgb": torch.from_numpy(
-                obs["wrist_rgb"]
-            ).permute(2, 0, 1).unsqueeze(0).float().to(self.device) / 255.0,
-            "observation.state": torch.from_numpy(
-                obs["state"]
-            ).unsqueeze(0).float().to(self.device),
+            "observation.images.wrist_rgb": wrist_tensor,
+            "observation.state": state_tensor,
+            "observation.language.tokens": tokenized["input_ids"].to(self.device),
+            "observation.language.attention_mask": tokenized["attention_mask"].bool().to(self.device),
         }
 
         with torch.no_grad():
@@ -135,19 +158,29 @@ class VLAPolicyWrapper:
 
     def _get_action_groot(self, obs: dict, task_instruction: str) -> torch.Tensor:
         """Get action from GR00T N1.5 policy."""
-        # Prepare observation for LeRobot/GR00T format
-        lerobot_obs = {
-            "observation.images.wrist_rgb": torch.from_numpy(
-                obs["wrist_rgb"]
-            ).permute(2, 0, 1).unsqueeze(0).float().to(self.device) / 255.0,
-            "observation.state": torch.from_numpy(
-                obs["state"]
-            ).unsqueeze(0).float().to(self.device),
+        from PIL import Image
+
+        # Convert wrist RGB to PIL Image for preprocessor
+        wrist_image = Image.fromarray(obs["wrist_rgb"].astype(np.uint8))
+
+        # Prepare observation in the format expected by the preprocessor
+        # The preprocessor expects data similar to dataset format
+        raw_obs = {
+            "observation.images.wrist_rgb": wrist_image,
+            "observation.state": obs["state"],
             "task": task_instruction,
         }
 
+        # Apply preprocessor to convert to GR00T format
+        processed = self.preprocessor(raw_obs)
+
+        # Move tensors to device
+        for k, v in processed.items():
+            if isinstance(v, torch.Tensor):
+                processed[k] = v.to(self.device)
+
         with torch.no_grad():
-            action = self.policy.select_action(lerobot_obs)
+            action = self.policy.select_action(processed)
 
         return action.squeeze(0)
 

@@ -377,3 +377,150 @@ data/
 | `--fps` | 30 | Video frame rate |
 | `--camera` | `table_cam` | Camera to use (`table_cam` or `wrist_cam`) |
 | `--headless` | False | Run without GUI (faster) |
+
+---
+
+## VLA Policy Evaluation
+
+Evaluate fine-tuned Vision-Language-Action (VLA) policies on the MCX Card Block Insert task.
+
+### Supported Models
+
+| Policy | Model ID | Description |
+|--------|----------|-------------|
+| Pi-Zero | `tshiamor/pizero-mcx-card` | LeRobot Pi-Zero (3.5B params) fine-tuned on MCX card demos |
+| GR00T N1.5 | `tshiamor/groot-n15-mcx-card` | NVIDIA GR00T N1.5-3B fine-tuned on MCX card demos |
+| OpenVLA | `tshiamor/openvla-mcx-card` | OpenVLA fine-tuned on MCX card demos |
+
+### Prerequisites
+
+Install LeRobot in the IsaacLab environment:
+
+```bash
+# Activate IsaacLab conda environment
+conda activate isaaclab
+
+# Install LeRobot
+pip install -e ~/lerobot
+
+# For Pi-Zero: Install special transformers fork
+pip install "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
+
+# For Flash Attention (recommended for speed)
+pip install flash-attn --no-build-isolation
+
+# Fix NumPy compatibility for pinocchio
+pip install "numpy<2"
+```
+
+### Running Evaluation
+
+```bash
+cd ~/SIMULATION_MANIPULATION/franka_factory
+
+# Pi-Zero evaluation
+python scripts/eval/eval_vla_policy.py \
+    --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+    --policy pizero \
+    --model tshiamor/pizero-mcx-card \
+    --episodes 10 \
+    --max_steps 100 \
+    --enable_cameras
+
+# GR00T N1.5 evaluation
+python scripts/eval/eval_vla_policy.py \
+    --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+    --policy groot \
+    --model tshiamor/groot-n15-mcx-card \
+    --episodes 10 \
+    --max_steps 100 \
+    --enable_cameras
+
+# OpenVLA evaluation
+python scripts/eval/eval_vla_policy.py \
+    --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+    --policy openvla \
+    --model tshiamor/openvla-mcx-card \
+    --episodes 10 \
+    --max_steps 100 \
+    --enable_cameras
+
+# Headless mode (faster, no GUI)
+python scripts/eval/eval_vla_policy.py \
+    --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+    --policy pizero \
+    --model tshiamor/pizero-mcx-card \
+    --episodes 10 \
+    --enable_cameras \
+    --headless
+```
+
+### Evaluation Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--task` | Required | Task environment name |
+| `--policy` | Required | Policy type: `pizero`, `groot`, or `openvla` |
+| `--model` | Required | HuggingFace model ID |
+| `--num_envs` | 1 | Number of parallel environments |
+| `--episodes` | 10 | Number of evaluation episodes |
+| `--max_steps` | 500 | Maximum steps per episode |
+| `--task_instruction` | "pick up the blue block..." | Language instruction for the task |
+| `--enable_cameras` | False | Enable camera sensors (required for VLA) |
+| `--headless` | False | Run without GUI |
+
+### Observation Format
+
+The evaluation script converts Isaac Lab observations to VLA policy format:
+
+**Isaac Lab Observations:**
+- `policy.joint_pos`: (N, 9) joint positions
+- `policy.joint_vel`: (N, 9) joint velocities
+- `policy.eef_pos`: (N, 3) end-effector position
+- `policy.eef_quat`: (N, 4) end-effector quaternion
+- `policy.gripper_pos`: (N, 2) gripper finger positions
+- `policy.wrist_cam`: (N, 200, 200, 3) wrist camera RGB
+- `policy.table_cam`: (N, 200, 200, 3) table camera RGB
+
+**VLA Policy Input:**
+- `wrist_rgb`: (224, 224, 3) resized wrist camera image
+- `state`: (18,) proprioceptive state [joint_pos(9), joint_vel(9)]
+
+### Action Format
+
+VLA policies output 7D actions:
+- **arm_action**: 6D relative pose (position + rotation)
+- **gripper_action**: 1D binary gripper command
+
+### Training VLA Models
+
+See `scripts/data_pipeline/` for training scripts:
+
+```bash
+# Train Pi-Zero on cloud GPU (requires HF_TOKEN)
+export HF_TOKEN="your_huggingface_token"
+bash scripts/data_pipeline/brev_train_pizero.sh
+
+# Train GR00T N1.5 on cloud GPU
+bash scripts/data_pipeline/brev_train_groot.sh
+```
+
+### Troubleshooting
+
+**NumPy version conflict:**
+```
+ImportError: A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
+```
+Fix: `pip install "numpy<2"`
+
+**Flash Attention not found:**
+```
+ImportError: FlashAttention2 has been toggled on, but it cannot be used
+```
+Fix: `pip install flash-attn --no-build-isolation`
+
+**Transformers version error (Pi-Zero):**
+```
+ValueError: An incorrect transformer version is used
+```
+Fix: `pip install "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"`
