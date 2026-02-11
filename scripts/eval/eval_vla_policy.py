@@ -8,6 +8,7 @@ Evaluate fine-tuned VLA policies on Franka-Factory-MCXCardBlockInsert task.
 Supports:
 - Pi-Zero (LeRobot): tshiamor/pizero-mcx-card
 - GR00T N1.5 (LeRobot): tshiamor/groot-n15-mcx-card
+- GR00T N1.6 (Isaac-GR00T): /home/tshiamo/groot_data/finetune_output_n16
 - OpenVLA: tshiamor/openvla-mcx-card
 
 Usage:
@@ -15,9 +16,13 @@ Usage:
     ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
         --policy pizero --model tshiamor/pizero-mcx-card --enable_cameras
 
-    # GR00T
+    # GR00T N1.5
     ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
         --policy groot --model tshiamor/groot-n15-mcx-card --enable_cameras
+
+    # GR00T N1.6 (fine-tuned)
+    ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+        --policy groot_n16 --model /home/tshiamo/groot_data/finetune_output_n16 --enable_cameras
 
     # OpenVLA
     ./isaaclab.sh -p scripts/eval/eval_vla_policy.py --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
@@ -30,7 +35,7 @@ from isaaclab.app import AppLauncher
 # CLI arguments
 parser = argparse.ArgumentParser(description="Evaluate VLA policies on MCX Card task")
 parser.add_argument("--task", type=str, required=True, help="Task name")
-parser.add_argument("--policy", type=str, required=True, choices=["pizero", "groot", "openvla"])
+parser.add_argument("--policy", type=str, required=True, choices=["pizero", "groot", "groot_n16", "openvla"])
 parser.add_argument("--model", type=str, required=True, help="HuggingFace model ID")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
 parser.add_argument("--episodes", type=int, default=10, help="Number of episodes")
@@ -83,12 +88,43 @@ class VLAPolicyWrapper:
 
         elif self.policy_type == "groot":
             from lerobot.policies.groot.modeling_groot import GrootPolicy
-            from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors
-            self.policy = GrootPolicy.from_pretrained(self.model_id)
+            from lerobot.processor.pipeline import DataProcessorPipeline
+            self.policy = GrootPolicy.from_pretrained(
+                pretrained_name_or_path=self.model_id,
+                strict=False,
+            )
             self.policy.to(self.device)
+            self.policy.config.device = self.device
             self.policy.eval()
-            # Create preprocessor for GR00T
-            self.preprocessor, self.postprocessor = make_groot_pre_post_processors(self.policy.config)
+            # Load preprocessor/postprocessor with trained dataset stats from model repo
+            self.preprocessor = DataProcessorPipeline.from_pretrained(
+                self.model_id, config_filename="policy_preprocessor.json"
+            )
+            self.postprocessor = DataProcessorPipeline.from_pretrained(
+                self.model_id, config_filename="policy_postprocessor.json"
+            )
+
+        elif self.policy_type == "groot_n16":
+            import sys
+            import importlib
+            from pathlib import Path
+
+            # Add Isaac-GR00T to path (not pip-installed, local repo)
+            sys.path.insert(0, "/home/tshiamo/Isaac-GR00T")
+            from gr00t.policy.gr00t_policy import Gr00tPolicy as Gr00tN16Policy
+            from gr00t.data.embodiment_tags import EmbodimentTag
+
+            # Register our modality config so the processor knows our embodiment
+            config_path = "/home/tshiamo/SIMULATION_MANIPULATION/franka_factory/scripts/groot_finetune/franka_mcx_config.py"
+            sys.path.append(str(Path(config_path).parent))
+            importlib.import_module("franka_mcx_config")
+
+            self.policy = Gr00tN16Policy(
+                embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+                model_path=self.model_id,
+                device=self.device,
+                strict=False,
+            )
 
         elif self.policy_type == "openvla":
             from transformers import AutoModelForVision2Seq, AutoProcessor
@@ -116,6 +152,11 @@ class VLAPolicyWrapper:
 
         print(f"Policy loaded successfully!")
 
+    def reset(self):
+        """Reset policy state (e.g., action queue for GR00T)."""
+        if self.policy_type in ("groot", "groot_n16"):
+            self.policy.reset()
+
     def get_action(self, obs: dict, task_instruction: str = None) -> torch.Tensor:
         """Get action from policy given observation.
 
@@ -130,6 +171,8 @@ class VLAPolicyWrapper:
             return self._get_action_pizero(obs, task_instruction)
         elif self.policy_type == "groot":
             return self._get_action_groot(obs, task_instruction)
+        elif self.policy_type == "groot_n16":
+            return self._get_action_groot_n16(obs, task_instruction)
         elif self.policy_type == "openvla":
             return self._get_action_openvla(obs, task_instruction)
 
@@ -168,32 +211,81 @@ class VLAPolicyWrapper:
         return action.squeeze(0)
 
     def _get_action_groot(self, obs: dict, task_instruction: str) -> torch.Tensor:
-        """Get action from GR00T N1.5 policy."""
-        from PIL import Image
+        """Get action from GR00T N1.5 policy.
 
-        # Convert wrist RGB to PIL Image for preprocessor
-        wrist_image = Image.fromarray(obs["wrist_rgb"].astype(np.uint8))
+        Uses the LeRobot preprocessor -> select_action -> postprocessor pipeline.
+        The preprocessor handles:
+        1. Image conversion to uint8 numpy (B, T, V, C, H, W) for Eagle VLM
+        2. State padding to max_state_dim with mask
+        3. Eagle VLM encoding (tokenization + image processing)
+        4. Moving tensors to device
+        The postprocessor handles:
+        5. Selecting last timestep from action horizon
+        6. Slicing to env action dimension
+        7. Inverse min-max normalization (if stats provided)
+        """
+        from copy import deepcopy
 
-        # Prepare observation in the format expected by the preprocessor
-        # The preprocessor expects data similar to dataset format
-        raw_obs = {
-            "observation.images.wrist_rgb": wrist_image,
-            "observation.state": obs["state"],
-            "task": task_instruction,
+        # Prepare image as torch tensor (1, 3, H, W) float32 in [0, 1]
+        wrist_rgb = obs["wrist_rgb"].astype(np.float32) / 255.0  # (H, W, 3) in [0, 1]
+        wrist_tensor = torch.from_numpy(wrist_rgb).permute(2, 0, 1).unsqueeze(0).float()  # (1, 3, H, W)
+
+        # Prepare state as torch tensor (1, D)
+        state_tensor = torch.from_numpy(obs["state"]).unsqueeze(0).float()  # (1, 18)
+
+        # Build batch in LeRobot format
+        batch = {
+            "observation.images.wrist_rgb": wrist_tensor,
+            "observation.state": state_tensor,
+            "task": [task_instruction],
         }
 
-        # Apply preprocessor to convert to GR00T format
-        processed = self.preprocessor(raw_obs)
-
-        # Move tensors to device
-        for k, v in processed.items():
-            if isinstance(v, torch.Tensor):
-                processed[k] = v.to(self.device)
+        # Run through preprocessor (handles Eagle encoding, state padding, device transfer)
+        processed = self.preprocessor(deepcopy(batch))
 
         with torch.no_grad():
             action = self.policy.select_action(processed)
 
+        # Run through postprocessor (unnormalization, slice to env action dim)
+        # Postprocessor expects a batch dict with "action" key, returns batch dict
+        action_batch = self.postprocessor({"action": action})
+        action = action_batch["action"]
+
         return action.squeeze(0)
+
+    def _get_action_groot_n16(self, obs: dict, task_instruction: str) -> torch.Tensor:
+        """Get action from GR00T N1.6 policy.
+
+        Uses Isaac-GR00T's native Gr00tPolicy which handles:
+        1. VLA processor (Eagle VLM encoding, state normalization)
+        2. Diffusion action head inference (4 denoising steps)
+        3. Action decoding and unnormalization
+        """
+        # Build observation in Gr00tPolicy's expected nested dict format
+        observation = {
+            "video": {
+                "wrist": obs["wrist_rgb"][np.newaxis, np.newaxis, ...],   # (1,1,H,W,3) uint8
+                "table": obs["table_rgb"][np.newaxis, np.newaxis, ...],   # (1,1,H,W,3) uint8
+            },
+            "state": {
+                "eef_pos": obs["eef_pos"][np.newaxis, np.newaxis, :],     # (1,1,3) float32
+                "eef_quat": obs["eef_quat"][np.newaxis, np.newaxis, :],   # (1,1,4) float32
+                "gripper": obs["gripper_pos"][np.newaxis, np.newaxis, :],  # (1,1,1) float32
+            },
+            "language": {
+                "annotation.human.task_description": [[task_instruction]],  # list[list[str]]
+            },
+        }
+
+        # Gr00tPolicy returns: {"arm": (1,T,6), "gripper": (1,T,1)} where T=action_horizon
+        action_dict, _ = self.policy.get_action(observation)
+
+        # Take first timestep action, concatenate arm + gripper → 7D
+        arm = action_dict["arm"][0, 0, :]        # (6,)
+        gripper = action_dict["gripper"][0, 0, :]  # (1,)
+        action = np.concatenate([arm, gripper])    # (7,)
+
+        return torch.from_numpy(action).float().to(self.device)
 
     def _get_action_openvla(self, obs: dict, task_instruction: str) -> torch.Tensor:
         """Get action from OpenVLA policy.
@@ -244,26 +336,42 @@ def prepare_observation(env_obs: dict, device: str = "cuda") -> dict:
         policy.wrist_cam: (N, H, W, 3) wrist camera RGB
         policy.table_cam: (N, H, W, 3) table camera RGB
 
-    VLA policy expects:
+    Returns dict with:
         wrist_rgb: (H, W, 3) uint8 RGB image
-        state: (18,) proprioceptive state [joint_pos(9), joint_vel(9)] or similar
+        table_rgb: (H, W, 3) uint8 RGB image
+        state: (18,) proprioceptive state [joint_pos(9), joint_vel(9)]
+        eef_pos: (3,) float32 end-effector position
+        eef_quat: (4,) float32 end-effector quaternion
+        gripper_pos: (1,) float32 gripper opening (first finger)
     """
     policy_obs = env_obs["policy"]
 
-    # Get wrist camera image (first env)
+    # Get camera images (first env)
     wrist_rgb = policy_obs["wrist_cam"][0].cpu().numpy()  # (H, W, 3)
     if wrist_rgb.dtype != np.uint8:
         wrist_rgb = (wrist_rgb * 255).astype(np.uint8)
 
-    # Construct proprioceptive state
-    # Concatenate: joint_pos (9) + joint_vel (9) = 18 dims
+    table_rgb = policy_obs["table_cam"][0].cpu().numpy()  # (H, W, 3)
+    if table_rgb.dtype != np.uint8:
+        table_rgb = (table_rgb * 255).astype(np.uint8)
+
+    # Construct proprioceptive state (for Pi-Zero, GR00T N1.5, OpenVLA)
     joint_pos = policy_obs["joint_pos"][0].cpu().numpy()
     joint_vel = policy_obs["joint_vel"][0].cpu().numpy()
     state = np.concatenate([joint_pos, joint_vel]).astype(np.float32)
 
+    # Individual state components (for GR00T N1.6)
+    eef_pos = policy_obs["eef_pos"][0].cpu().numpy().astype(np.float32)      # (3,)
+    eef_quat = policy_obs["eef_quat"][0].cpu().numpy().astype(np.float32)    # (4,)
+    gripper_pos = policy_obs["gripper_pos"][0, :1].cpu().numpy().astype(np.float32)  # (1,) first finger
+
     return {
         "wrist_rgb": wrist_rgb,
+        "table_rgb": table_rgb,
         "state": state,
+        "eef_pos": eef_pos,
+        "eef_quat": eef_quat,
+        "gripper_pos": gripper_pos,
     }
 
 
@@ -293,8 +401,9 @@ def run_evaluation():
     print(f"Task: {args_cli.task_instruction}\n")
 
     for ep in range(args_cli.episodes):
-        # Reset environment
+        # Reset environment and policy state
         obs, info = env.reset()
+        vla_policy.reset()
         episode_reward = 0.0
         success = False
 

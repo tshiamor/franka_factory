@@ -3,7 +3,8 @@
 This directory contains scripts for:
 1. **Cosmos Augmentation** - Scale 215 demos to 1000+ using NVIDIA Cosmos-Transfer2.5
 2. **VLA Data Preparation** - Convert demos to OpenVLA, Pi-Zero, and GR00T N1.6 formats
-3. **VLA Model Training** - Fine-tune VLA models on NVIDIA Brev cloud
+3. **VLA Model Training** - Fine-tune VLA models on NVIDIA Brev cloud or locally
+4. **GR00T N1.6 Local Pipeline** - End-to-end local fine-tuning using Isaac-GR00T
 
 ## Pipeline Overview
 
@@ -50,7 +51,8 @@ This directory contains scripts for:
 | `brev_cosmos_augment.sh` | Run Cosmos augmentation on Brev | Augmented videos |
 | `brev_train_openvla.sh` | Train OpenVLA on Brev | Fine-tuned model |
 | `brev_train_pizero.sh` | Train Pi-Zero on Brev | ACT policy model |
-| `brev_train_groot.sh` | Train GR00T N1.6 on Brev | Diffusion policy |
+| `brev_train_groot.sh` | Train GR00T N1.5 on Brev (LeRobot) | Diffusion policy |
+| `brev_train_groot_n16.sh` | Train GR00T N1.6 locally (Isaac-GR00T) | Fine-tuned N1.6 model |
 
 ---
 
@@ -238,19 +240,105 @@ bash brev_train_pizero.sh
 
 **Output Model:** `tshiamor/pizero-mcx-card`
 
-### Train GR00T N1.6
+### Train GR00T N1.5 (Brev)
 ```bash
 export HF_TOKEN="your_huggingface_token"
 bash brev_train_groot.sh
 ```
 
 **Features:**
+- Uses LeRobot's GR00T integration
+- Pre-trained nvidia/GR00T-N1.5-3B base model
 - Diffusion-based action decoder
-- Multi-camera fusion (wrist + table)
-- Action chunking (horizon=16)
-- Vision Transformer backbone
 
-**Output Model:** `tshiamor/groot-n16-mcx-card`
+**Output Model:** `tshiamor/groot-n15-mcx-card`
+
+### Train GR00T N1.6 (Local - Recommended)
+```bash
+bash brev_train_groot_n16.sh
+```
+
+**Features:**
+- Uses Isaac-GR00T's native fine-tuning pipeline (NOT LeRobot)
+- Pre-trained nvidia/GR00T-N1.6-3B base model (3B params)
+- Eagle3 vision backbone + Qwen2 LLM + diffusion action head
+- Memory optimizations for RTX 5090 / consumer GPUs (32GB VRAM)
+- End-to-end: HDF5 conversion → training → model post-processing
+
+**Output Model:** `~/groot_data/finetune_output_n16/`
+
+**Configuration (environment variables):**
+```bash
+HDF5_PATH=/path/to/demos.hdf5       # Training data
+BATCH_SIZE=4                          # Per-GPU batch size
+GRAD_ACCUM=8                          # Gradient accumulation steps
+MAX_STEPS=10000                       # Training steps (~3.5 hours on RTX 5090)
+LEARNING_RATE=1e-4                    # Learning rate
+```
+
+**Run with evaluation:**
+```bash
+bash brev_train_groot_n16.sh --eval
+```
+
+---
+
+## Step 5: Evaluate Fine-tuned Models in Isaac Lab
+
+After training, evaluate models on the MCX Card Block Insertion task in Isaac Lab.
+
+### GR00T N1.6 (local fine-tuned)
+```bash
+CONDA_PREFIX=~/miniforge3/envs/isaaclab \
+  ~/IsaacLab/isaaclab.sh -p \
+  scripts/eval/eval_vla_policy.py \
+  --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+  --policy groot_n16 \
+  --model ~/groot_data/finetune_output_n16 \
+  --enable_cameras --headless --episodes 10
+```
+
+### Pi-Zero
+```bash
+CONDA_PREFIX=~/miniforge3/envs/isaaclab \
+  ~/IsaacLab/isaaclab.sh -p \
+  scripts/eval/eval_vla_policy.py \
+  --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+  --policy pizero \
+  --model tshiamor/pizero-mcx-card \
+  --enable_cameras --headless --episodes 10
+```
+
+### GR00T N1.5
+```bash
+CONDA_PREFIX=~/miniforge3/envs/isaaclab \
+  ~/IsaacLab/isaaclab.sh -p \
+  scripts/eval/eval_vla_policy.py \
+  --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+  --policy groot \
+  --model tshiamor/groot-n15-mcx-card \
+  --enable_cameras --headless --episodes 10
+```
+
+### OpenVLA
+```bash
+CONDA_PREFIX=~/miniforge3/envs/isaaclab \
+  ~/IsaacLab/isaaclab.sh -p \
+  scripts/eval/eval_vla_policy.py \
+  --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+  --policy openvla \
+  --model tshiamor/openvla-mcx-card \
+  --enable_cameras --headless --episodes 10
+```
+
+### Supported policies
+
+| Policy | Model | Type | Description |
+|--------|-------|------|-------------|
+| `pizero` | `tshiamor/pizero-mcx-card` | HuggingFace | Pi-Zero via LeRobot |
+| `groot` | `tshiamor/groot-n15-mcx-card` | HuggingFace | GR00T N1.5 via LeRobot |
+| `groot_n16` | Local path | Local | GR00T N1.6 via Isaac-GR00T |
+| `openvla` | `tshiamor/openvla-mcx-card` | HuggingFace | OpenVLA-7B |
 
 ---
 
@@ -274,14 +362,23 @@ bash brev_train_groot.sh
 | `BATCH_SIZE` | 32 | Per-GPU batch size |
 | `LEARNING_RATE` | 1e-4 | Learning rate |
 
-### GR00T N1.6 (brev_train_groot.sh)
+### GR00T N1.5 (brev_train_groot.sh)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `ACTION_HORIZON` | 16 | Action chunk size |
-| `MODEL_VERSION` | n1.6 | GR00T version |
-| `NUM_EPOCHS` | 100 | Training epochs |
+| `BASE_MODEL` | nvidia/GR00T-N1.5-3B | Pre-trained model |
+| `STEPS` | 30000 | Training steps |
 | `BATCH_SIZE` | 16 | Per-GPU batch size |
+
+### GR00T N1.6 Local (brev_train_groot_n16.sh)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `BASE_MODEL` | nvidia/GR00T-N1.6-3B | Pre-trained model (3B params) |
+| `BATCH_SIZE` | 4 | Per-GPU batch size |
+| `GRAD_ACCUM` | 8 | Gradient accumulation (effective=32) |
+| `MAX_STEPS` | 10000 | Training steps (~3.5 hrs RTX 5090) |
 | `LEARNING_RATE` | 1e-4 | Learning rate |
+| Optimizer | adamw_bnb_8bit | 8-bit optimizer (saves ~75% VRAM) |
+| Grad checkpoint | True | Saves ~50% activation VRAM |
 
 ---
 
@@ -338,6 +435,7 @@ groot_data/
 ### "CUDA out of memory"
 - Reduce batch size in training scripts
 - Use gradient accumulation
+- For GR00T N1.6: `BATCH_SIZE=2 GRAD_ACCUM=16 bash brev_train_groot_n16.sh`
 
 ### "Module not found"
 ```bash
@@ -353,6 +451,28 @@ huggingface-cli login   # Re-authenticate
 ### "Video extraction failed"
 ```bash
 pip install imageio-ffmpeg imageio[ffmpeg]
+```
+
+### GR00T N1.6: "Eagle3_VLConfig" / "_attn_implementation_autoset" error
+Fine-tuning requires transformers==4.51.3 (NOT 4.57.x):
+```bash
+pip install transformers==4.51.3
+rm -rf ~/.cache/huggingface/modules/transformers_modules/Eagle_hyphen_Block2A_hyphen_2B_hyphen_v2/
+```
+
+### GR00T N1.6: "Unrecognized processing class" during inference
+Processor files are in `processor/` subdirectory but AutoProcessor looks in model root:
+```bash
+cd ~/groot_data/finetune_output_n16
+cp processor/processor_config.json processor/embodiment_id.json processor/statistics.json .
+```
+(The `brev_train_groot_n16.sh` script handles this automatically in Step 5.)
+
+### GR00T N1.6: "No module named 'gr00t'"
+Isaac-GR00T must be installed or on `sys.path`:
+```bash
+cd ~/Isaac-GR00T && pip install -e .
+# Or set: export PYTHONPATH=~/Isaac-GR00T:$PYTHONPATH
 ```
 
 ---
