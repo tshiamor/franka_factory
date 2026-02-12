@@ -390,21 +390,31 @@ Evaluate fine-tuned Vision-Language-Action (VLA) policies on the MCX Card Block 
 |--------|----------|-------------|
 | Pi-Zero | `tshiamor/pizero-mcx-card` | LeRobot Pi-Zero (3.5B params) fine-tuned on MCX card demos |
 | GR00T N1.5 | `tshiamor/groot-n15-mcx-card` | NVIDIA GR00T N1.5-3B fine-tuned on MCX card demos |
+| GR00T N1.6 | `~/groot_data/finetune_output_n16` | NVIDIA GR00T N1.6-3B locally fine-tuned on MCX card demos |
 | OpenVLA | `tshiamor/openvla-mcx-card` | OpenVLA fine-tuned on MCX card demos |
 
 ### Prerequisites
 
-Install LeRobot in the IsaacLab environment:
+#### 1. Clone required repositories
 
 ```bash
-# Activate IsaacLab conda environment
+# LeRobot (required for Pi-Zero and GR00T N1.5)
+git clone https://github.com/huggingface/lerobot.git ~/lerobot
+
+# Isaac-GR00T (required for GR00T N1.6 fine-tuning and inference)
+git clone https://github.com/NVIDIA/Isaac-GR00T.git ~/Isaac-GR00T
+```
+
+#### 2. Install dependencies in IsaacLab environment
+
+```bash
 conda activate isaaclab
 
-# Install LeRobot
+# Install LeRobot (for Pi-Zero, GR00T N1.5)
 pip install -e ~/lerobot
 
-# For Pi-Zero: Install special transformers fork
-pip install "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
+# Install Isaac-GR00T (for GR00T N1.6)
+cd ~/Isaac-GR00T && pip install -e .
 
 # For OpenVLA: Install timm (compatible version)
 pip install "timm>=0.9.10,<1.0.0"
@@ -415,6 +425,30 @@ pip install flash-attn --no-build-isolation
 # Fix NumPy compatibility for pinocchio
 pip install "numpy<2"
 ```
+
+#### 3. Transformers version (per model)
+
+Different models require different `transformers` versions. The batch eval script
+(`run_all_evals.sh`) handles this automatically. For manual runs:
+
+```bash
+# Pi-Zero / GR00T N1.6: transformers 4.51.3
+pip install transformers==4.51.3
+
+# GR00T N1.5: transformers 4.57.1
+pip install transformers==4.57.1
+
+# OpenVLA: transformers 4.45.0
+pip install transformers==4.45.0
+```
+
+#### 4. GR00T N1.6 local fine-tuning (optional)
+
+To fine-tune GR00T N1.6 on your own data, see the training pipeline:
+```bash
+bash scripts/data_pipeline/brev_train_groot_n16.sh
+```
+The fine-tuned model will be saved to `~/groot_data/finetune_output_n16/`.
 
 ### Running Evaluation
 
@@ -439,6 +473,15 @@ python scripts/eval/eval_vla_policy.py \
     --max_steps 100 \
     --enable_cameras
 
+# GR00T N1.6 evaluation (locally fine-tuned)
+python scripts/eval/eval_vla_policy.py \
+    --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
+    --policy groot_n16 \
+    --model ~/groot_data/finetune_output_n16 \
+    --episodes 10 \
+    --max_steps 100 \
+    --enable_cameras
+
 # OpenVLA evaluation
 python scripts/eval/eval_vla_policy.py \
     --task Franka-Factory-MCXCardBlockInsert-Mimic-v0 \
@@ -456,6 +499,9 @@ python scripts/eval/eval_vla_policy.py \
     --episodes 10 \
     --enable_cameras \
     --headless
+
+# Run ALL models in sequence (batch)
+bash scripts/eval/run_all_evals.sh --episodes 10 --max_steps 2400
 ```
 
 ### Evaluation Parameters
@@ -463,8 +509,8 @@ python scripts/eval/eval_vla_policy.py \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--task` | Required | Task environment name |
-| `--policy` | Required | Policy type: `pizero`, `groot`, or `openvla` |
-| `--model` | Required | HuggingFace model ID |
+| `--policy` | Required | Policy type: `pizero`, `groot`, `groot_n16`, or `openvla` |
+| `--model` | Required | HuggingFace model ID or local path |
 | `--num_envs` | 1 | Number of parallel environments |
 | `--episodes` | 10 | Number of evaluation episodes |
 | `--max_steps` | 500 | Maximum steps per episode |
