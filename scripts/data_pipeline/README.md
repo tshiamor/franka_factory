@@ -53,6 +53,8 @@ This directory contains scripts for:
 | `brev_train_pizero.sh` | Train Pi-Zero on Brev | ACT policy model |
 | `brev_train_groot.sh` | Train GR00T N1.5 on Brev (LeRobot) | Diffusion policy |
 | `brev_train_groot_n16.sh` | Train GR00T N1.6 locally (Isaac-GR00T) | Fine-tuned N1.6 model |
+| `../eval/run_all_evals.sh` | Batch evaluate all VLA models | Summary table + logs |
+| `../eval/eval_vla_policy.py` | Evaluate single VLA model in Isaac Lab | Episode results |
 
 ---
 
@@ -331,14 +333,35 @@ CONDA_PREFIX=~/miniforge3/envs/isaaclab \
   --enable_cameras --headless --episodes 10
 ```
 
+### Run All Evaluations (Batch)
+
+Run all 4 models in sequence with automatic transformers version switching and GPU cleanup:
+
+```bash
+# Headless, 10 episodes each (default)
+bash scripts/eval/run_all_evals.sh
+
+# Fewer episodes for faster testing
+bash scripts/eval/run_all_evals.sh --episodes 5 --max_steps 1200
+
+# With GUI visualization
+bash scripts/eval/run_all_evals.sh --gui
+```
+
+The script handles:
+- Switching `transformers` version per model (Pi-Zero/GR00T N1.6: 4.51.3, GR00T N1.5: 4.57.1, OpenVLA: 4.45.0)
+- Killing leftover GPU processes between runs
+- Logging each run to `scripts/eval/eval_logs/`
+- Printing a summary table at the end
+
 ### Supported policies
 
-| Policy | Model | Type | Description |
-|--------|-------|------|-------------|
-| `pizero` | `tshiamor/pizero-mcx-card` | HuggingFace | Pi-Zero via LeRobot |
-| `groot` | `tshiamor/groot-n15-mcx-card` | HuggingFace | GR00T N1.5 via LeRobot |
-| `groot_n16` | Local path | Local | GR00T N1.6 via Isaac-GR00T |
-| `openvla` | `tshiamor/openvla-mcx-card` | HuggingFace | OpenVLA-7B |
+| Policy | Model | Type | transformers | Description |
+|--------|-------|------|-------------|-------------|
+| `pizero` | `tshiamor/pizero-mcx-card` | HuggingFace | 4.51.3 | Pi-Zero via LeRobot |
+| `groot` | `tshiamor/groot-n15-mcx-card` | HuggingFace | 4.57.1 | GR00T N1.5 via LeRobot |
+| `groot_n16` | Local path | Local | 4.51.3 | GR00T N1.6 via Isaac-GR00T |
+| `openvla` | `tshiamor/openvla-mcx-card` | HuggingFace | 4.45.0 | OpenVLA-7B |
 
 ---
 

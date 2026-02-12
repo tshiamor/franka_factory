@@ -127,14 +127,20 @@ class VLAPolicyWrapper:
             )
 
         elif self.policy_type == "openvla":
-            from transformers import AutoModelForVision2Seq, AutoProcessor
-            self.processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
-            self.policy = AutoModelForVision2Seq.from_pretrained(
+            from transformers import AutoProcessor
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
+            # Load processor from base model (avoids config class mismatch issues)
+            base_model = "openvla/openvla-7b"
+            self.processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
+            # Get model class directly from base model's remote code
+            model_class = get_class_from_dynamic_module(
+                "modeling_prismatic.OpenVLAForActionPrediction", base_model
+            )
+            # Load fine-tuned weights
+            self.policy = model_class.from_pretrained(
                 self.model_id,
                 torch_dtype=torch.bfloat16,
-                trust_remote_code=True,
                 low_cpu_mem_usage=True,
-                attn_implementation="eager",
             )
             self.policy.to(self.device)
             self.policy.eval()
